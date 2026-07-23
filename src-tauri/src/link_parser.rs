@@ -48,12 +48,18 @@ mod tests {
     #[test]
     fn links_with_spaces() {
         let links = extract_links("See [[Note Name]] and [[ Other Note ]] and [[Note Name]].");
-        assert_eq!(links, vec!["Note Name".to_string(), "Other Note".to_string()]);
+        assert_eq!(
+            links,
+            vec!["Note Name".to_string(), "Other Note".to_string()]
+        );
     }
 
     #[test]
     fn tags_but_not_headings() {
         let tags = extract_tags("# Heading\nSome #Ideas and #project/plinth here.");
-        assert_eq!(tags, vec!["ideas".to_string(), "project/plinth".to_string()]);
+        assert_eq!(
+            tags,
+            vec!["ideas".to_string(), "project/plinth".to_string()]
+        );
     }
 }

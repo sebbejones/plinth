@@ -8,6 +8,17 @@ open Plinth.Types
 [<Import("invoke", "@tauri-apps/api/core")>]
 let private invoke<'T> (cmd: string) (args: obj) : JS.Promise<'T> = jsNative
 
+/// Tauri commands reject with plain strings, not Error objects, so Fable's
+/// `ex.Message` is undefined for them (and `Some undefined` erases to None,
+/// silently swallowing the error). Normalize any caught value to text.
+let errorText (ex: exn) : string =
+    let raw: obj = box ex
+
+    if jsTypeof raw = "string" then unbox raw
+    else
+        let msg: obj = box ex.Message
+        if isNull msg || jsTypeof msg <> "string" then string raw else unbox msg
+
 [<Import("open", "@tauri-apps/plugin-dialog")>]
 let private openDialog (options: obj) : JS.Promise<string option> = jsNative
 
@@ -19,6 +30,10 @@ let private confirmRaw (message: string) (options: obj) : JS.Promise<bool> = jsN
 
 [<Import("message", "@tauri-apps/plugin-dialog")>]
 let private messageRaw (message: string) (options: obj) : JS.Promise<unit> = jsNative
+
+[<Import("listen", "@tauri-apps/api/event")>]
+let private listenRaw (event: string) (handler: {| payload: obj |} -> unit) : JS.Promise<unit -> unit> =
+    jsNative
 
 /// Ask the user to pick the vault folder. None if they cancelled.
 let pickFolder () : JS.Promise<string option> =
@@ -42,8 +57,9 @@ let saveZipDialog (defaultName: string) : JS.Promise<string option> =
            title = "Export vault as zip"
            filters = [| {| name = "Zip archive"; extensions = [| "zip" |] |} |] |}
 
-/// Open a vault: rebuilds the SQLite index and returns the note list.
-let setVault (path: string) : JS.Promise<NoteMeta[]> =
+/// Open a vault: rebuilds the SQLite index, starts the filesystem watcher,
+/// and reports notes plus any scan warnings.
+let setVault (path: string) : JS.Promise<VaultInfo> =
     invoke "set_vault" {| path = path |}
 
 let readDir () : JS.Promise<NoteMeta[]> =
@@ -54,13 +70,32 @@ let readDir () : JS.Promise<NoteMeta[]> =
 let readFile (name: string) : JS.Promise<NoteContent> =
     invoke "read_file" {| name = name |}
 
+/// Read a note only if its file exists — never creates it, never touches
+/// recents. None when the file is gone. Used for reloads and conflicts.
+let loadNote (name: string) : JS.Promise<NoteContent option> =
+    invoke "load_note" {| name = name |}
+
 /// Delete a note's file; returns the refreshed note list.
 let deleteFile (name: string) : JS.Promise<NoteMeta[]> =
     invoke "delete_file" {| name = name |}
 
-/// Save a note; returns the refreshed note list for the sidebar.
-let writeFile (name: string) (content: string) : JS.Promise<NoteMeta[]> =
-    invoke "write_file" {| name = name; content = content |}
+/// Save a note without clobbering external edits: `baseHash` is the hash of
+/// the disk content last seen; pass None to write unconditionally (only
+/// after the user explicitly chose to keep their version).
+let writeFile (name: string) (content: string) (baseHash: string option) : JS.Promise<WriteResult> =
+    invoke "write_file" {| name = name; content = content; baseHash = baseHash |}
+
+/// Rename a note and rewrite every [[link]] to it across the vault.
+let renameNote (oldName: string) (newName: string) : JS.Promise<RenameOutcome> =
+    invoke "rename_note" {| oldName = oldName; newName = newName |}
+
+/// External filesystem changes noticed by the watcher, debounced batches.
+let onVaultChanged (handler: VaultChanges -> unit) : JS.Promise<unit -> unit> =
+    listenRaw "vault-changed" (fun e -> handler (unbox e.payload))
+
+/// The watcher failed at runtime; outside edits are no longer noticed.
+let onWatcherError (handler: string -> unit) : JS.Promise<unit -> unit> =
+    listenRaw "watcher-error" (fun e -> handler (unbox e.payload))
 
 let search (query: string) : JS.Promise<SearchHit[]> =
     invoke "search" {| query = query |}

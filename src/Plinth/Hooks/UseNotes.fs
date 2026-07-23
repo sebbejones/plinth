@@ -1,6 +1,7 @@
 /// All vault/note state management in one custom hook.
 module Plinth.Hooks.UseNotes
 
+open Browser.WebStorage
 open Fable.Core
 open Feliz
 open Plinth
@@ -16,14 +17,32 @@ type NotesApi =
       Current: NoteState
       TagFilter: (string * string[]) option
       Dirty: bool
+      /// Vault-scan and watcher warnings (nested files, duplicate names).
+      Warnings: string[]
+      /// Set when filesystem watching is unavailable for the open vault.
+      WatcherError: string option
+      /// Why the app is on the welcome screen (e.g. last vault missing).
+      WelcomeInfo: string option
       PickVault: unit -> unit
       OpenNote: string -> unit
       OpenToday: unit -> unit
       UpdateContent: string -> unit
       DeleteNote: string -> unit
+      /// Rename the current note. Resolves to Some error when it failed.
+      RenameNote: string -> JS.Promise<string option>
+      /// In a conflict/deleted state: write the local text to disk.
+      KeepLocalVersion: unit -> unit
+      /// In a conflict: adopt the disk version, discarding local edits.
+      LoadDiskVersion: unit -> unit
+      /// In a deleted state: accept the deletion and navigate away.
+      DiscardLocal: unit -> unit
+      DismissWarnings: unit -> unit
+      DismissWatcherError: unit -> unit
       ExportVault: unit -> unit
       FilterByTag: string -> unit
       ClearTagFilter: unit -> unit }
+
+let private lastVaultKey = "plinth-last-vault"
 
 let useNotes () : NotesApi =
     let vault, setVault = React.useState<string option> None
@@ -34,14 +53,31 @@ let useNotes () : NotesApi =
     let current, setCurrent = React.useState<NoteState> NoVault
     let tagFilter, setTagFilter = React.useState<(string * string[]) option> None
     let dirty, setDirty = React.useState false
+    let warnings, setWarnings = React.useStateWithUpdater<string[]> [||]
+    let watcherError, setWatcherError = React.useState<string option> None
+    let welcomeInfo, setWelcomeInfo = React.useState<string option> None
     // Bumped on every keystroke so a save that finishes can tell whether
     // newer edits arrived while it was writing (and must stay dirty).
     let editGen = React.useRef 0
+    // Hash of the disk content the editor last loaded or saved — the save
+    // command uses it to detect external edits instead of overwriting them.
+    let baseHash = React.useRef<string option> None
+    // Live mirrors for the once-registered filesystem event listener.
+    let currentRef = React.useRef current
+    let dirtyRef = React.useRef dirty
+    currentRef.current <- current
+    dirtyRef.current <- dirty
 
     let refreshTags () =
         promise {
             let! t = Tauri.getTags ()
             setTags t
+        }
+
+    let refreshRecents () =
+        promise {
+            let! r = Tauri.getRecents ()
+            setRecents r
         }
 
     let openNote (name: string) =
@@ -57,36 +93,89 @@ let useNotes () : NotesApi =
                 setNotes updated
                 let! bl = Tauri.getBacklinks note.Name
                 setBacklinks bl
-                let! recent = Tauri.getRecents ()
-                setRecents recent
+                do! refreshRecents ()
                 do! refreshTags ()
+                baseHash.current <- Some note.Hash
                 setDirty false
                 setCurrent (EditingNote(note.Name, note.Content))
             with ex ->
-                setCurrent (NoteError ex.Message)
+                setCurrent (NoteError(Tauri.errorText ex))
         }
         |> Promise.start
 
     let openToday () = openNote (Date.todayName ())
 
-    let pickVault () =
+    /// Open a folder as the vault. `auto` marks the startup reopen of the
+    /// remembered vault: failures land on the welcome screen with an
+    /// explanation instead of an error pane, and no note file is created
+    /// unless the vault is empty.
+    let openVaultPath (path: string) (auto: bool) =
+        let before = current
+
         promise {
             try
-                let! choice = Tauri.pickFolder ()
+                setCurrent VaultLoading
+                let! info = Tauri.setVault path
+                localStorage.setItem (lastVaultKey, path)
+                setVault (Some path)
+                setNotes info.Notes
+                setWarnings (fun _ -> info.Warnings)
+                setWatcherError info.WatcherError
+                setTagFilter None
+                setWelcomeInfo None
 
-                match choice with
-                | None -> ()
-                | Some path ->
-                    setCurrent VaultLoading
-                    let! initial = Tauri.setVault path
-                    setVault (Some path)
-                    setNotes initial
-                    setTagFilter None
-                    openNote (Date.todayName ())
+                if auto then
+                    // Land where the user left off rather than creating
+                    // today's note as a side effect of starting the app.
+                    let! recent = Tauri.getRecents ()
+                    setRecents recent
+
+                    match recent |> Array.tryHead with
+                    | Some name -> openNote name
+                    | None ->
+                        match info.Notes |> Array.tryHead with
+                        | Some n -> openNote n.Name
+                        | None -> openToday ()
+                else
+                    openToday ()
             with ex ->
-                setCurrent (NoteError ex.Message)
+                match vault with
+                | Some _ when not auto ->
+                    // A vault is already open; report and stay where we were.
+                    do! Tauri.messageDialog ("Couldn't open that folder as a vault: " + Tauri.errorText ex) true
+                    setCurrent before
+                | _ ->
+                    setCurrent NoVault
+                    setWelcomeInfo (
+                        Some(
+                            (if auto then
+                                 sprintf "Couldn't reopen your last vault (%s): %s" path (Tauri.errorText ex)
+                             else
+                                 sprintf "Couldn't open that folder as a vault: %s" (Tauri.errorText ex))
+                            + " Choose a vault folder to continue."
+                        )
+                    )
         }
         |> Promise.start
+
+    let pickVault () =
+        promise {
+            let! choice = Tauri.pickFolder ()
+
+            match choice with
+            | None -> ()
+            | Some path -> openVaultPath path false
+        }
+        |> Promise.start
+
+    // Reopen the last vault on startup, if one was remembered.
+    let reopenLastVault () =
+        match localStorage.getItem lastVaultKey with
+        | null
+        | "" -> ()
+        | path -> openVaultPath path true
+
+    React.useEffect (reopenLastVault, [||])
 
     let updateContent (text: string) =
         match current with
@@ -98,6 +187,9 @@ let useNotes () : NotesApi =
 
     // Debounced autosave, 700 ms after the last keystroke. The effect's
     // cleanup cancels the pending timer whenever the content changes again.
+    // A save that discovers an external edit or deletion switches to the
+    // matching conflict state instead of writing; autosave then stays off
+    // because it only runs while the state is EditingNote.
     let autosaveEffect () : unit -> unit =
         match current, dirty with
         | EditingNote(name, content), true ->
@@ -106,18 +198,33 @@ let useNotes () : NotesApi =
                     (fun () ->
                         let gen = editGen.current
 
+                        // The freshest local text at the time the save
+                        // result arrives — never park stale text in a
+                        // conflict state.
+                        let latestLocal () =
+                            match currentRef.current with
+                            | EditingNote(n, c) when n = name -> c
+                            | _ -> content
+
                         promise {
                             try
-                                let! updated = Tauri.writeFile name content
-                                setNotes updated
-                                let! bl = Tauri.getBacklinks name
-                                setBacklinks bl
-                                do! refreshTags ()
+                                let! result = Tauri.writeFile name content baseHash.current
 
-                                if editGen.current = gen then
-                                    setDirty false
+                                match result.Status with
+                                | "saved" ->
+                                    setNotes result.Notes
+                                    baseHash.current <- Some result.Hash
+                                    let! bl = Tauri.getBacklinks name
+                                    setBacklinks bl
+                                    do! refreshTags ()
+
+                                    if editGen.current = gen then
+                                        setDirty false
+                                | "conflict" -> setCurrent (ConflictNote(name, latestLocal (), result.Disk))
+                                | "missing" -> setCurrent (DeletedNote(name, Some(latestLocal ())))
+                                | _ -> ()
                             with ex ->
-                                setCurrent (NoteError ex.Message)
+                                setCurrent (NoteError(Tauri.errorText ex))
                         }
                         |> Promise.start)
                     700
@@ -126,6 +233,226 @@ let useNotes () : NotesApi =
         | _ -> ignore
 
     React.useEffect (autosaveEffect, [| box current; box dirty |])
+
+    // React to external filesystem changes noticed by the Rust watcher.
+    // Registered once; reads live state through refs.
+    let externalChangesEffect () : unit -> unit =
+        let mutable unlisteners: (unit -> unit) list = []
+        let mutable disposed = false
+
+        let nameOf state =
+            match state with
+            | EditingNote(n, _)
+            | LoadingNote n
+            | ConflictNote(n, _, _)
+            | DeletedNote(n, _) -> Some n
+            | _ -> None
+
+        let touches (name: string) (arr: string[]) =
+            let l = name.ToLowerInvariant()
+            arr |> Array.exists (fun x -> x.ToLowerInvariant() = l)
+
+        let handleChanges (changes: VaultChanges) =
+            promise {
+                let! updated = Tauri.readDir ()
+                setNotes updated
+                do! refreshTags ()
+                do! refreshRecents ()
+
+                if changes.Warnings.Length > 0 then
+                    setWarnings (fun old ->
+                        Array.append old (changes.Warnings |> Array.filter (fun w -> not (Array.contains w old))))
+
+                match nameOf currentRef.current with
+                | Some n ->
+                    let! bl = Tauri.getBacklinks n
+                    setBacklinks bl
+                | None -> ()
+
+                match currentRef.current with
+                | EditingNote(name, content) ->
+                    if touches name changes.Deleted then
+                        setCurrent (DeletedNote(name, (if dirtyRef.current then Some content else None)))
+                    elif touches name changes.Modified || touches name changes.Created then
+                        let! disk = Tauri.loadNote name
+
+                        match disk with
+                        | Some d ->
+                            if Some d.Hash = baseHash.current then
+                                // Our own save echoing back; nothing changed.
+                                ()
+                            elif dirtyRef.current then
+                                if d.Content = content then
+                                    // The external write matches the local
+                                    // text exactly — treat it as saved.
+                                    baseHash.current <- Some d.Hash
+                                    setDirty false
+                                else
+                                    setCurrent (ConflictNote(name, content, d.Content))
+                            else
+                                baseHash.current <- Some d.Hash
+                                setCurrent (EditingNote(d.Name, d.Content))
+                        | None ->
+                            setCurrent (DeletedNote(name, (if dirtyRef.current then Some content else None)))
+                | ConflictNote(name, local, _) ->
+                    if touches name changes.Deleted then
+                        setCurrent (DeletedNote(name, Some local))
+                    elif touches name changes.Modified || touches name changes.Created then
+                        // The disk side of the conflict moved again.
+                        let! disk = Tauri.loadNote name
+
+                        match disk with
+                        | Some d -> setCurrent (ConflictNote(name, local, d.Content))
+                        | None -> setCurrent (DeletedNote(name, Some local))
+                | DeletedNote(name, local) ->
+                    if touches name changes.Created || touches name changes.Modified then
+                        // The file came back (recreated externally).
+                        let! disk = Tauri.loadNote name
+
+                        match disk, local with
+                        | Some d, Some l when l <> d.Content -> setCurrent (ConflictNote(name, l, d.Content))
+                        | Some d, _ ->
+                            baseHash.current <- Some d.Hash
+                            setDirty false
+                            setCurrent (EditingNote(d.Name, d.Content))
+                        | None, _ -> ()
+                | _ -> ()
+            }
+            |> Promise.start
+
+        promise {
+            let! unChanged = Tauri.onVaultChanged handleChanges
+            let! unError = Tauri.onWatcherError (fun msg -> setWatcherError (Some msg))
+
+            if disposed then
+                unChanged ()
+                unError ()
+            else
+                unlisteners <- [ unChanged; unError ]
+        }
+        |> Promise.start
+
+        fun () ->
+            disposed <- true
+            unlisteners |> List.iter (fun un -> un ())
+
+    React.useEffect (externalChangesEffect, [||])
+
+    let keepLocalVersion () =
+        match current with
+        | ConflictNote(name, local, _)
+        | DeletedNote(name, Some local) ->
+            promise {
+                try
+                    let! result = Tauri.writeFile name local None
+
+                    if result.Status = "saved" then
+                        setNotes result.Notes
+                        baseHash.current <- Some result.Hash
+                        setDirty false
+                        setCurrent (EditingNote(name, local))
+                        let! bl = Tauri.getBacklinks name
+                        setBacklinks bl
+                        do! refreshTags ()
+                        do! refreshRecents ()
+                with ex ->
+                    setCurrent (NoteError(Tauri.errorText ex))
+            }
+            |> Promise.start
+        | _ -> ()
+
+    let loadDiskVersion () =
+        match current with
+        | ConflictNote(name, _, _) ->
+            promise {
+                try
+                    let! disk = Tauri.loadNote name
+
+                    match disk with
+                    | Some d ->
+                        baseHash.current <- Some d.Hash
+                        setDirty false
+                        setCurrent (EditingNote(d.Name, d.Content))
+                    | None ->
+                        // The disk version vanished while the user decided.
+                        setCurrent (DeletedNote(name, None))
+                with ex ->
+                    setCurrent (NoteError(Tauri.errorText ex))
+            }
+            |> Promise.start
+        | _ -> ()
+
+    let discardLocal () =
+        match current with
+        | DeletedNote _ ->
+            setDirty false
+
+            promise {
+                let! recent = Tauri.getRecents ()
+                setRecents recent
+
+                match recent |> Array.tryHead with
+                | Some next -> openNote next
+                | None ->
+                    let! ns = Tauri.readDir ()
+
+                    match ns |> Array.tryHead with
+                    | Some n -> openNote n.Name
+                    | None -> openToday ()
+            }
+            |> Promise.start
+        | _ -> ()
+
+    let renameNote (newName: string) : JS.Promise<string option> =
+        promise {
+            match current with
+            | EditingNote(name, content) ->
+                try
+                    let mutable blocker = None
+
+                    // Flush pending edits so the rename starts from a
+                    // saved file — and surface any conflict instead.
+                    if dirty then
+                        let! flushed = Tauri.writeFile name content baseHash.current
+
+                        match flushed.Status with
+                        | "saved" ->
+                            baseHash.current <- Some flushed.Hash
+                            setNotes flushed.Notes
+                            setDirty false
+                        | "conflict" ->
+                            setCurrent (ConflictNote(name, content, flushed.Disk))
+                            blocker <- Some "The file changed on disk. Resolve the conflict first."
+                        | "missing" ->
+                            setCurrent (DeletedNote(name, Some content))
+                            blocker <- Some "The file was deleted outside Plinth. Resolve that first."
+                        | _ -> ()
+
+                    match blocker with
+                    | Some msg -> return Some msg
+                    | None ->
+                        let! outcome = Tauri.renameNote name newName
+                        setNotes outcome.Notes
+                        // Reload from disk: the rename may have rewritten a
+                        // self-link inside this note's own body.
+                        let! reloaded = Tauri.loadNote outcome.Name
+
+                        match reloaded with
+                        | Some d ->
+                            baseHash.current <- Some d.Hash
+                            setDirty false
+                            setCurrent (EditingNote(d.Name, d.Content))
+                        | None -> setCurrent (NoteError "The renamed note could not be reloaded.")
+
+                        let! bl = Tauri.getBacklinks outcome.Name
+                        setBacklinks bl
+                        do! refreshTags ()
+                        do! refreshRecents ()
+                        return None
+                with ex ->
+                    return Some(Tauri.errorText ex)
+            | _ -> return Some "Open a note to rename it."
+        }
 
     let filterByTag (tag: string) =
         promise {
@@ -157,9 +484,9 @@ let useNotes () : NotesApi =
                     | None ->
                         match updated |> Array.tryHead with
                         | Some n -> openNote n.Name
-                        | None -> openNote (Date.todayName ())
+                        | None -> openToday ()
             with ex ->
-                setCurrent (NoteError ex.Message)
+                setCurrent (NoteError(Tauri.errorText ex))
         }
         |> Promise.start
 
@@ -174,7 +501,7 @@ let useNotes () : NotesApi =
                     let! count = Tauri.exportVault path
                     do! Tauri.messageDialog (sprintf "Exported %i files to:\n%s" count path) false
             with ex ->
-                do! Tauri.messageDialog ("Export failed: " + ex.Message) true
+                do! Tauri.messageDialog ("Export failed: " + Tauri.errorText ex) true
         }
         |> Promise.start
 
@@ -186,11 +513,21 @@ let useNotes () : NotesApi =
       Current = current
       TagFilter = tagFilter
       Dirty = dirty
+      Warnings = warnings
+      WatcherError = watcherError
+      WelcomeInfo = welcomeInfo
       PickVault = pickVault
       OpenNote = openNote
       OpenToday = openToday
       UpdateContent = updateContent
       DeleteNote = deleteNote
+      RenameNote = renameNote
+      KeepLocalVersion = keepLocalVersion
+      LoadDiskVersion = loadDiskVersion
+      DiscardLocal = discardLocal
+      DismissWarnings = fun () -> setWarnings (fun _ -> [||])
+      DismissWatcherError = fun () -> setWatcherError None
       ExportVault = exportVault
       FilterByTag = filterByTag
       ClearTagFilter = fun () -> setTagFilter None }
+

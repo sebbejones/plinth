@@ -135,13 +135,28 @@ Slow morning. Started mapping out why [[Owning Your Data]] is the whole point, n
     return i >= needle.length;
   };
 
+  // Mirrors the Rust content hash's role (any deterministic function of
+  // the content works for the mock).
+  const hashOf = (s) => {
+    let h = 2166136261 >>> 0;
+    for (let i = 0; i < s.length; i++) {
+      h ^= s.charCodeAt(i);
+      h = Math.imul(h, 16777619) >>> 0;
+    }
+    return h.toString(16);
+  };
+
   const commands = {
     "plugin:dialog|open": () => "Demo Vault (in-memory)",
     "plugin:dialog|confirm": () => true,
     "plugin:dialog|message": () => null,
     "plugin:dialog|save": () => null,
+    // The real app pushes watcher events; the browser demo has no
+    // filesystem, so listeners are registered and never fire.
+    "plugin:event|listen": () => 1,
+    "plugin:event|unlisten": () => null,
 
-    set_vault: () => list(),
+    set_vault: () => ({ Notes: list(), Warnings: [], WatcherError: null }),
     read_dir: () => list(),
 
     read_file: ({ name }) => {
@@ -152,14 +167,57 @@ Slow morning. Started mapping out why [[Owning Your Data]] is the whole point, n
         notes.set(key, note);
       }
       recents.set(note.name, clock++);
-      return { Name: note.name, Content: note.content };
+      return { Name: note.name, Content: note.content, Hash: hashOf(note.content) };
     },
 
-    write_file: ({ name, content }) => {
+    load_note: ({ name }) => {
+      const note = notes.get(name.trim().toLowerCase());
+      return note ? { Name: note.name, Content: note.content, Hash: hashOf(note.content) } : null;
+    },
+
+    write_file: ({ name, content, baseHash }) => {
       const key = name.trim().toLowerCase();
       const existing = notes.get(key);
+      if (baseHash != null) {
+        if (!existing) return { Status: "missing", Notes: [], Hash: "", Disk: "" };
+        if (hashOf(existing.content) !== baseHash && existing.content !== content)
+          return { Status: "conflict", Notes: [], Hash: "", Disk: existing.content };
+      }
       notes.set(key, { name: existing ? existing.name : name.trim(), content });
-      return list();
+      return { Status: "saved", Notes: list(), Hash: hashOf(content), Disk: "" };
+    },
+
+    rename_note: ({ oldName, newName }) => {
+      const oldKey = oldName.trim().toLowerCase();
+      const trimmed = newName.trim();
+      const newKey = trimmed.toLowerCase();
+      if (!trimmed) throw "Note name is empty.";
+      if (/[/\\:*?"<>|]/.test(trimmed) || trimmed.includes("..") || trimmed.startsWith("."))
+        throw `Note names can't contain unsafe characters.`;
+      const note = notes.get(oldKey);
+      if (!note) throw `Note "${oldName}" was not found.`;
+      if (newKey !== oldKey && notes.has(newKey)) throw `A note named "${trimmed}" already exists.`;
+      const linkRe2 = new RegExp(
+        `\\[\\[\\s*${note.name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*\\]\\]`,
+        "gi",
+      );
+      let linksUpdated = 0;
+      for (const [k, n] of notes.entries()) {
+        const rewritten = n.content.replace(linkRe2, () => {
+          linksUpdated++;
+          return `[[${trimmed}]]`;
+        });
+        if (rewritten !== n.content) notes.set(k, { name: n.name, content: rewritten });
+      }
+      const moved = notes.get(oldKey);
+      notes.delete(oldKey);
+      notes.set(newKey, { name: trimmed, content: moved.content });
+      if (recents.has(note.name)) {
+        const t = recents.get(note.name);
+        recents.delete(note.name);
+        recents.set(trimmed, t);
+      }
+      return { Notes: list(), Name: trimmed, LinksUpdated: linksUpdated };
     },
 
     delete_file: ({ name }) => {
@@ -275,6 +333,11 @@ Slow morning. Started mapping out why [[Owning Your Data]] is the whole point, n
       throw "Export needs the desktop app — this is the in-browser demo.";
     },
   };
+
+  // Debug handle so browser-devtools (and UI tests) can simulate external
+  // edits: mutate a note here, then keep typing — the next autosave sees
+  // the mismatch and the conflict flow kicks in.
+  window.__plinthMock = { notes, hashOf };
 
   window.__TAURI_INTERNALS__ = {
     invoke: async (cmd, args = {}) => {

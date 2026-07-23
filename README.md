@@ -29,6 +29,9 @@ And a tool for thinking should never grow a marketplace.
 - **Command palette** (`Ctrl+K`) fuzzy-jumps to any note, creates one that doesn't exist yet, or runs an app action, all without the mouse
 - **Tags** with a `#tag` explorer to slice across your notes
 - **Full-text search** across everything, instant
+- **Safe renaming** — rename a note and every `[[link]]` to it across the vault follows; plain prose that happens to mention the old name is left alone
+- **Stays in agreement with your files** — create, edit, delete, or rename notes in any other program while Plinth is running and it notices and keeps up. If a note you're editing changes on disk underneath you, Plinth never silently picks a side: your unsaved text and the disk version are both kept, and you choose which one survives.
+- **Reopens your last vault** when the app starts, and lands on the note you left off in
 - **Plain Markdown files** in a folder you own, no database to escape from
 - **Local-first**, works offline forever, move the folder and it still works
 
@@ -44,6 +47,12 @@ And a tool for thinking should never grow a marketplace.
 | `Ctrl+G` | Open the Firmament |
 | `Ctrl+K` | Open the command palette |
 | `Esc` | Close the Firmament or palette |
+
+## How the vault works
+
+A vault is one folder of Markdown files, and the model is deliberately flat: the `.md` files at the folder's root are the notes — one file, one note, the filename is the note's name. Subfolders are yours to keep anything in; Plinth leaves them completely alone, and if it spots Markdown files inside them it says so (once, dismissibly) rather than silently skipping or half-indexing them. Two files whose names differ only by case are never silently merged either — Plinth indexes neither and tells you.
+
+The only thing Plinth ever adds to your folder is `.plinth/`, a rebuildable search index. Delete it any time; it is recreated from your files on the next open, because the files are the source of truth.
 
 ## What it refuses to do
 

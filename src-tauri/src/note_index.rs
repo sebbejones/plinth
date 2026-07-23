@@ -13,7 +13,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Clone, Debug)]
 #[serde(rename_all = "PascalCase")]
 pub struct NoteMeta {
     pub name: String,
@@ -60,6 +60,17 @@ pub struct GraphData {
 
 pub fn open(db_path: &Path) -> rusqlite::Result<Connection> {
     let conn = Connection::open(db_path)?;
+    // SQLite's built-in NOCASE folds ASCII only, but Windows resolves file
+    // paths case-insensitively for accented letters too (Ü == ü). Left
+    // as-is, [[über notes]] would miss the indexed "Über Notes", and the
+    // create-on-miss path would overwrite the real file with a stub.
+    // Overriding NOCASE with Rust's Unicode lowercasing keeps every
+    // COLLATE NOCASE query in agreement with both the filesystem and the
+    // graph's canonicalization.
+    conn.create_collation("NOCASE", |a, b| a.to_lowercase().cmp(&b.to_lowercase()))?;
+    // The index is a rebuildable cache: trade a little durability for a lot
+    // of write speed. Losing it in a crash only costs a reindex on reopen.
+    conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")?;
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS notes (
              name    TEXT PRIMARY KEY,
@@ -84,29 +95,155 @@ pub fn open(db_path: &Path) -> rusqlite::Result<Connection> {
     Ok(conn)
 }
 
-/// Walk the vault and rebuild the whole index. Hidden folders (including
-/// `.plinth` itself) are skipped. Returns the number of notes indexed.
-pub fn reindex_vault(conn: &Connection, vault: &Path) -> Result<usize, String> {
+/// What opening a vault found: how many notes were indexed, plus anything
+/// the user should know about files that were left alone.
+pub struct VaultScan {
+    /// Read by tests and available to callers; the command layer only
+    /// forwards the warnings.
+    #[allow(dead_code)]
+    pub notes_indexed: usize,
+    pub warnings: Vec<String>,
+}
+
+/// Rebuild the whole index from the vault folder. The vault model is flat:
+/// only Markdown files in the vault root become notes. Hidden files, editor
+/// temp files, and `.plinth` are skipped. Nested Markdown files and
+/// case-insensitive duplicate basenames are never indexed silently — they
+/// are left untouched on disk and reported as warnings.
+pub fn reindex_vault(conn: &Connection, vault: &Path) -> Result<VaultScan, String> {
+    // One transaction for the whole rebuild: without it every note is its
+    // own fsync'd write and a thousand-note vault takes the better part of
+    // a minute to open instead of well under a second.
+    conn.execute_batch("BEGIN IMMEDIATE;")
+        .map_err(|e| e.to_string())?;
+    let result = reindex_vault_inner(conn, vault);
+    if result.is_ok() {
+        conn.execute_batch("COMMIT;").map_err(|e| e.to_string())?;
+    } else {
+        let _ = conn.execute_batch("ROLLBACK;");
+    }
+    result
+}
+
+fn reindex_vault_inner(conn: &Connection, vault: &Path) -> Result<VaultScan, String> {
     conn.execute_batch("DELETE FROM notes; DELETE FROM links; DELETE FROM tags;")
         .map_err(|e| e.to_string())?;
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    for entry in fs::read_dir(vault).map_err(|e| e.to_string())? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        if is_root_note_file(&path) {
+            candidates.push(path);
+        }
+    }
+    let (unique, mut warnings) = partition_root_files(candidates);
+
     let mut count = 0;
+    for path in unique {
+        let Some(name) = path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        let content = fs::read_to_string(&path).unwrap_or_default();
+        index_note(conn, name, &path.to_string_lossy(), &content).map_err(|e| e.to_string())?;
+        count += 1;
+    }
+
+    // Nested markdown files are user data Plinth doesn't manage: report
+    // them so nobody thinks they were quietly included.
+    let mut nested: Vec<String> = Vec::new();
     for entry in WalkDir::new(vault)
         .into_iter()
         .filter_entry(|e| !is_hidden(e))
         .filter_map(|e| e.ok())
     {
-        let path = entry.path();
-        if path.extension().and_then(|s| s.to_str()) != Some("md") {
+        // Root-level files were handled above; only subfolder contents count.
+        if entry.depth() < 2 {
             continue;
         }
-        let Some(name) = path.file_stem().and_then(|s| s.to_str()) else {
+        let path = entry.path();
+        if path
+            .extension()
+            .and_then(|s| s.to_str())
+            .map(|s| s.eq_ignore_ascii_case("md"))
+            == Some(true)
+        {
+            if let Ok(rel) = path.strip_prefix(vault) {
+                nested.push(rel.to_string_lossy().to_string());
+            }
+        }
+    }
+    if !nested.is_empty() {
+        let sample: Vec<&str> = nested.iter().take(3).map(|s| s.as_str()).collect();
+        let suffix = if nested.len() > 3 { ", …" } else { "" };
+        warnings.push(format!(
+            "{} Markdown file(s) in subfolders were left untouched and not indexed \
+             ({}{}). Plinth reads notes from the vault root only — move a file to the \
+             vault root to make it a note.",
+            nested.len(),
+            sample.join(", "),
+            suffix
+        ));
+    }
+
+    Ok(VaultScan {
+        notes_indexed: count,
+        warnings,
+    })
+}
+
+/// Is this root-level file one Plinth would index as a note? Markdown only
+/// (extension compared case-insensitively), skipping hidden files and
+/// editor temp files.
+pub(crate) fn is_root_note_file(path: &Path) -> bool {
+    let Some(file_name) = path.file_name().and_then(|s| s.to_str()) else {
+        return false;
+    };
+    if file_name.starts_with('.') || file_name.starts_with("~$") {
+        return false;
+    }
+    let lower = file_name.to_lowercase();
+    lower.ends_with(".md") && lower.len() > 3
+}
+
+/// Split candidate note files into indexable ones and warnings about
+/// case-insensitive duplicate stems. Duplicates are never resolved by
+/// picking a winner: all colliding files are skipped and reported. (On
+/// Windows's case-insensitive filesystem such collisions can't normally
+/// exist; this protects vaults synced from case-sensitive systems.)
+pub(crate) fn partition_root_files(candidates: Vec<PathBuf>) -> (Vec<PathBuf>, Vec<String>) {
+    let mut by_stem: BTreeMap<String, Vec<PathBuf>> = BTreeMap::new();
+    for path in candidates {
+        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
             continue;
         };
-        let content = fs::read_to_string(path).unwrap_or_default();
-        index_note(conn, name, &path.to_string_lossy(), &content).map_err(|e| e.to_string())?;
-        count += 1;
+        by_stem.entry(stem.to_lowercase()).or_default().push(path);
     }
-    Ok(count)
+    let mut unique = Vec::new();
+    let mut warnings = Vec::new();
+    for (_, files) in by_stem {
+        if files.len() > 1 {
+            let names: Vec<String> = files
+                .iter()
+                .map(|p| {
+                    p.file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .to_string()
+                })
+                .collect();
+            warnings.push(format!(
+                "{} share one note name (names match ignoring case). None of them were \
+                 indexed — rename them outside Plinth so each note has a distinct name.",
+                names.join(" and ")
+            ));
+            continue;
+        }
+        unique.extend(files);
+    }
+    (unique, warnings)
 }
 
 pub(crate) fn is_hidden(entry: &walkdir::DirEntry) -> bool {
@@ -119,25 +256,30 @@ pub(crate) fn is_hidden(entry: &walkdir::DirEntry) -> bool {
 }
 
 /// Upsert a single note and replace its outgoing links and tags.
-pub fn index_note(conn: &Connection, name: &str, path: &str, content: &str) -> rusqlite::Result<()> {
-    conn.execute(
+pub fn index_note(
+    conn: &Connection,
+    name: &str,
+    path: &str,
+    content: &str,
+) -> rusqlite::Result<()> {
+    // Cached prepared statements: this runs once per note in a full
+    // reindex, and re-preparing the SQL each call adds up on large vaults.
+    conn.prepare_cached(
         "INSERT INTO notes(name, path, content) VALUES (?1, ?2, ?3)
          ON CONFLICT(name) DO UPDATE SET path = ?2, content = ?3",
-        params![name, path, content],
-    )?;
-    conn.execute("DELETE FROM links WHERE source = ?1", params![name])?;
-    conn.execute("DELETE FROM tags WHERE note = ?1", params![name])?;
+    )?
+    .execute(params![name, path, content])?;
+    conn.prepare_cached("DELETE FROM links WHERE source = ?1")?
+        .execute(params![name])?;
+    conn.prepare_cached("DELETE FROM tags WHERE note = ?1")?
+        .execute(params![name])?;
     for target in link_parser::extract_links(content) {
-        conn.execute(
-            "INSERT INTO links(source, target) VALUES (?1, ?2)",
-            params![name, target],
-        )?;
+        conn.prepare_cached("INSERT INTO links(source, target) VALUES (?1, ?2)")?
+            .execute(params![name, target])?;
     }
     for tag in link_parser::extract_tags(content) {
-        conn.execute(
-            "INSERT INTO tags(note, tag) VALUES (?1, ?2)",
-            params![name, tag],
-        )?;
+        conn.prepare_cached("INSERT INTO tags(note, tag) VALUES (?1, ?2)")?
+            .execute(params![name, tag])?;
     }
     Ok(())
 }
@@ -196,9 +338,7 @@ pub fn search(conn: &Connection, query: &str) -> rusqlite::Result<Vec<SearchHit>
     let compact: String = q.chars().filter(|c| !c.is_whitespace()).collect();
 
     let mut stmt = conn.prepare("SELECT name, content FROM notes")?;
-    let rows = stmt.query_map([], |r| {
-        Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-    })?;
+    let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
 
     let mut scored: Vec<(i64, SearchHit)> = Vec::new();
     for row in rows {
@@ -266,10 +406,22 @@ pub fn recent_notes(conn: &Connection, limit: i64) -> rusqlite::Result<Vec<Strin
 /// Drop a note from every index table. Backlinks pointing at it stay in
 /// other notes' text and simply become create-on-click links again.
 pub fn remove_note(conn: &Connection, name: &str) -> rusqlite::Result<()> {
-    conn.execute("DELETE FROM notes WHERE name = ?1 COLLATE NOCASE", params![name])?;
-    conn.execute("DELETE FROM links WHERE source = ?1 COLLATE NOCASE", params![name])?;
-    conn.execute("DELETE FROM tags WHERE note = ?1 COLLATE NOCASE", params![name])?;
-    conn.execute("DELETE FROM recents WHERE note = ?1 COLLATE NOCASE", params![name])?;
+    conn.execute(
+        "DELETE FROM notes WHERE name = ?1 COLLATE NOCASE",
+        params![name],
+    )?;
+    conn.execute(
+        "DELETE FROM links WHERE source = ?1 COLLATE NOCASE",
+        params![name],
+    )?;
+    conn.execute(
+        "DELETE FROM tags WHERE note = ?1 COLLATE NOCASE",
+        params![name],
+    )?;
+    conn.execute(
+        "DELETE FROM recents WHERE note = ?1 COLLATE NOCASE",
+        params![name],
+    )?;
     Ok(())
 }
 
@@ -334,18 +486,14 @@ pub fn graph(conn: &Connection) -> rusqlite::Result<GraphData> {
 
     let mut note_tags: HashMap<String, Vec<String>> = HashMap::new();
     let mut stmt = conn.prepare("SELECT note, tag FROM tags ORDER BY tag")?;
-    let rows = stmt.query_map([], |r| {
-        Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-    })?;
+    let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
     for row in rows {
         let (note, tag) = row?;
         note_tags.entry(note).or_default().push(tag);
     }
 
     let mut stmt = conn.prepare("SELECT source, target FROM links")?;
-    let rows = stmt.query_map([], |r| {
-        Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-    })?;
+    let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
 
     // BTreeMap keeps ghost ordering deterministic across reloads.
     let mut ghosts: BTreeMap<String, String> = BTreeMap::new();
@@ -398,9 +546,8 @@ pub fn graph(conn: &Connection) -> rusqlite::Result<GraphData> {
 }
 
 pub fn notes_for_tag(conn: &Connection, tag: &str) -> rusqlite::Result<Vec<String>> {
-    let mut stmt = conn.prepare(
-        "SELECT DISTINCT note FROM tags WHERE tag = ?1 ORDER BY note COLLATE NOCASE",
-    )?;
+    let mut stmt =
+        conn.prepare("SELECT DISTINCT note FROM tags WHERE tag = ?1 ORDER BY note COLLATE NOCASE")?;
     let rows = stmt.query_map(params![tag.to_lowercase()], |r| r.get(0))?;
     rows.collect()
 }
@@ -428,23 +575,35 @@ mod tests {
 
         let conn = open(&dir.join("index.db")).unwrap();
 
-        assert_eq!(reindex_vault(&conn, &dir).unwrap(), 2);
+        let scan = reindex_vault(&conn, &dir).unwrap();
+        assert_eq!(scan.notes_indexed, 2);
+        assert!(scan.warnings.is_empty());
 
         // Sidebar list, sorted case-insensitively.
-        let names: Vec<String> = list_notes(&conn).unwrap().into_iter().map(|n| n.name).collect();
+        let names: Vec<String> = list_notes(&conn)
+            .unwrap()
+            .into_iter()
+            .map(|n| n.name)
+            .collect();
         assert_eq!(names, vec!["2026-07-03", "Plinth Roadmap"]);
 
         // [[Plinth Roadmap]] resolves case-insensitively (with spaces) and
         // reports the canonical name; the daily note shows as its backlink.
         let (_, canonical) = note_path(&conn, "plinth roadmap").unwrap().unwrap();
         assert_eq!(canonical, "Plinth Roadmap");
-        assert_eq!(backlinks(&conn, "Plinth Roadmap").unwrap(), vec!["2026-07-03"]);
+        assert_eq!(
+            backlinks(&conn, "Plinth Roadmap").unwrap(),
+            vec!["2026-07-03"]
+        );
 
         // Tag explorer: #dev on both notes, #roadmap on one.
         let tags = all_tags(&conn).unwrap();
         assert_eq!(tags.len(), 2);
         assert_eq!((tags[0].tag.as_str(), tags[0].count), ("dev", 2));
-        assert_eq!(notes_for_tag(&conn, "roadmap").unwrap(), vec!["Plinth Roadmap"]);
+        assert_eq!(
+            notes_for_tag(&conn, "roadmap").unwrap(),
+            vec!["Plinth Roadmap"]
+        );
 
         // Full-text search hits the body, not just the title.
         let hits = search(&conn, "milestone").unwrap();
@@ -494,5 +653,237 @@ mod tests {
         assert!(all_tags(&conn).unwrap().iter().all(|t| t.tag != "roadmap"));
 
         fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The flat vault model: nested markdown files, hidden files, temp
+    /// files and non-markdown files are never indexed — and never touched.
+    #[test]
+    fn flat_vault_skips_nested_and_irrelevant_files() {
+        let dir = std::env::temp_dir().join(format!("plinth-flat-{}", std::process::id()));
+        fs::remove_dir_all(&dir).ok();
+        fs::create_dir_all(dir.join("sub/deeper")).unwrap();
+        fs::create_dir_all(dir.join(".plinth")).unwrap();
+        fs::create_dir_all(dir.join(".hidden")).unwrap();
+        fs::write(dir.join("Root Note.md"), "# Root Note\n\n#real\n").unwrap();
+        fs::write(
+            dir.join("Second.MD"),
+            "# Second\n\ncase-insensitive extension\n",
+        )
+        .unwrap();
+        fs::write(dir.join("sub/Nested.md"), "# Nested\n\nleft alone\n").unwrap();
+        fs::write(dir.join("sub/deeper/Deep.md"), "# Deep\n").unwrap();
+        fs::write(dir.join(".hidden/Secret.md"), "# Secret\n").unwrap();
+        fs::write(dir.join(".plinth/Fake.md"), "# Fake\n").unwrap();
+        fs::write(dir.join("~$Temp.md"), "editor temp file").unwrap();
+        fs::write(dir.join("notes.txt"), "not markdown").unwrap();
+        fs::write(dir.join("export.zip"), "zip bytes").unwrap();
+
+        let conn = open(&dir.join(".plinth/index.db")).unwrap();
+        let scan = reindex_vault(&conn, &dir).unwrap();
+
+        // Only the two root-level markdown files became notes.
+        assert_eq!(scan.notes_indexed, 2);
+        let names: Vec<String> = list_notes(&conn)
+            .unwrap()
+            .into_iter()
+            .map(|n| n.name)
+            .collect();
+        assert_eq!(names, vec!["Root Note", "Second"]);
+
+        // The nested files are reported (but .plinth/.hidden contents are not).
+        assert_eq!(scan.warnings.len(), 1);
+        assert!(scan.warnings[0].contains("2 Markdown file(s) in subfolders"));
+        assert!(scan.warnings[0].contains("Nested.md"));
+
+        // Nothing on disk was moved, deleted, or rewritten.
+        assert_eq!(
+            fs::read_to_string(dir.join("sub/Nested.md")).unwrap(),
+            "# Nested\n\nleft alone\n"
+        );
+        assert!(dir.join("sub/deeper/Deep.md").exists());
+        assert!(dir.join(".hidden/Secret.md").exists());
+        assert!(dir.join("~$Temp.md").exists());
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Duplicate basenames (possible on case-sensitive filesystems) are
+    /// skipped entirely and reported — never resolved by silently picking
+    /// one of the files.
+    #[test]
+    fn duplicate_stems_are_skipped_and_reported() {
+        let (unique, warnings) = partition_root_files(vec![
+            PathBuf::from("/v/Note.md"),
+            PathBuf::from("/v/NOTE.md"),
+            PathBuf::from("/v/Other.md"),
+        ]);
+        assert_eq!(unique, vec![PathBuf::from("/v/Other.md")]);
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("Note.md"));
+        assert!(warnings[0].contains("NOTE.md"));
+        assert!(warnings[0].contains("None of them were"));
+    }
+
+    // ---- performance harness (run with: cargo test perf_ -- --ignored --nocapture)
+
+    fn lcg(seed: &mut u64) -> u64 {
+        *seed = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        *seed >> 33
+    }
+
+    /// Generate a realistic flat vault: wiki links (some unresolved), tags,
+    /// daily-note names, a mix of connected and isolated notes — not empty
+    /// placeholder files.
+    fn generate_vault(dir: &Path, n: usize) -> Vec<String> {
+        const WORDS: [&str; 16] = [
+            "signal",
+            "durable",
+            "layer",
+            "market",
+            "notebook",
+            "argument",
+            "practice",
+            "milestone",
+            "index",
+            "vault",
+            "foundation",
+            "draft",
+            "course",
+            "evidence",
+            "structure",
+            "review",
+        ];
+        const TAGS: [&str; 8] = [
+            "ideas", "project", "daily", "reading", "plinth", "research", "draft", "done",
+        ];
+        fs::create_dir_all(dir).unwrap();
+        let mut names: Vec<String> = Vec::with_capacity(n);
+        for i in 0..n {
+            if i % 7 == 0 {
+                // Bijective serial -> date so daily names never collide.
+                let d = 1 + i % 28;
+                let m = 1 + (i / 28) % 12;
+                let y = 2020 + i / (28 * 12);
+                names.push(format!("{y:04}-{m:02}-{d:02}"));
+            } else {
+                names.push(format!("Note {i} {}", WORDS[(i * 31) % WORDS.len()]));
+            }
+        }
+        let mut seed = 42u64;
+        for (i, name) in names.iter().enumerate() {
+            let mut body = format!("# {name}\n\n");
+            let paragraphs = 2 + (lcg(&mut seed) % 3) as usize;
+            for _ in 0..paragraphs {
+                let words = 20 + (lcg(&mut seed) % 40) as usize;
+                for _ in 0..words {
+                    body.push_str(WORDS[(lcg(&mut seed) as usize) % WORDS.len()]);
+                    body.push(' ');
+                }
+                body.push_str("\n\n");
+            }
+            // ~80% of notes link out; the rest stay isolated.
+            if lcg(&mut seed) % 10 < 8 {
+                let links = 1 + (lcg(&mut seed) % 5) as usize;
+                for _ in 0..links {
+                    if lcg(&mut seed) % 8 == 0 {
+                        body.push_str(&format!(
+                            "See [[Unwritten idea {}]].\n",
+                            lcg(&mut seed) % 200
+                        ));
+                    } else {
+                        let target = &names[(lcg(&mut seed) as usize) % names.len()];
+                        body.push_str(&format!("Related: [[{target}]].\n"));
+                    }
+                }
+            }
+            let tags = (lcg(&mut seed) % 4) as usize;
+            if tags > 0 {
+                body.push('\n');
+                for t in 0..tags {
+                    body.push_str(&format!("#{} ", TAGS[(i + t * 3) % TAGS.len()]));
+                }
+                body.push('\n');
+            }
+            fs::write(dir.join(format!("{name}.md")), body).unwrap();
+        }
+        names
+    }
+
+    fn perf_run(n: usize) {
+        use std::time::Instant;
+        let dir = std::env::temp_dir().join(format!("plinth-perf-{n}-{}", std::process::id()));
+        fs::remove_dir_all(&dir).ok();
+        let names = generate_vault(&dir, n);
+        fs::create_dir_all(dir.join(".plinth")).unwrap();
+        let conn = open(&dir.join(".plinth/index.db")).unwrap();
+
+        let t = Instant::now();
+        let scan = reindex_vault(&conn, &dir).unwrap();
+        let index_ms = t.elapsed().as_millis();
+        assert_eq!(scan.notes_indexed, n);
+
+        let t = Instant::now();
+        let hits = search(&conn, "durable foundation").unwrap();
+        let search_ms = t.elapsed().as_millis();
+
+        let t = Instant::now();
+        let title_hits = search(&conn, "note 500").unwrap();
+        let title_ms = t.elapsed().as_millis();
+
+        let t = Instant::now();
+        let g = graph(&conn).unwrap();
+        let graph_ms = t.elapsed().as_millis();
+
+        // A representative watcher refresh: one external edit synced.
+        let victim = &names[n / 2];
+        fs::write(
+            dir.join(format!("{victim}.md")),
+            "# changed\n\nExternal edit. [[Note 1 durable]] #changed\n",
+        )
+        .unwrap();
+        let se = std::sync::Mutex::new(crate::watcher::SelfEvents::default());
+        let mut paths = std::collections::BTreeSet::new();
+        paths.insert(dir.join(format!("{victim}.md")));
+        let t = Instant::now();
+        let changes = crate::watcher::sync_paths(&conn, &dir, &paths, &se);
+        let sync_ms = t.elapsed().as_millis();
+        assert_eq!(changes.modified.len(), 1);
+
+        println!(
+            "PERF n={n}: index {index_ms} ms | body search {search_ms} ms ({} hits) | \
+             title search {title_ms} ms ({} hits) | graph {graph_ms} ms ({} nodes, {} edges) | \
+             single-file watcher sync {sync_ms} ms",
+            hits.len(),
+            title_hits.len(),
+            g.nodes.len(),
+            g.edges.len()
+        );
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    #[ignore]
+    fn perf_1000_notes() {
+        perf_run(1000);
+    }
+
+    #[test]
+    #[ignore]
+    fn perf_5000_notes() {
+        perf_run(5000);
+    }
+
+    #[test]
+    fn root_note_file_filter() {
+        assert!(is_root_note_file(Path::new("/v/Note.md")));
+        assert!(is_root_note_file(Path::new("/v/Note.MD")));
+        assert!(!is_root_note_file(Path::new("/v/.hidden.md")));
+        assert!(!is_root_note_file(Path::new("/v/~$Note.md")));
+        assert!(!is_root_note_file(Path::new("/v/notes.txt")));
+        assert!(!is_root_note_file(Path::new("/v/export.zip")));
+        assert!(!is_root_note_file(Path::new("/v/.md")));
     }
 }
