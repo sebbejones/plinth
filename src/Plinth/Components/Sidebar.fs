@@ -17,7 +17,7 @@ let private mutedNote (text: string) =
     Html.p [ prop.className "px-4 text-xs text-stone-400 dark:text-stone-500"; prop.text text ]
 
 [<ReactComponent>]
-let Sidebar (api: NotesApi) (onGraph: unit -> unit) =
+let Sidebar (api: NotesApi) (onNewNote: unit -> unit) (onGraph: unit -> unit) =
     let currentName =
         match api.Current with
         | EditingNote(n, _)
@@ -47,6 +47,13 @@ let Sidebar (api: NotesApi) (onGraph: unit -> unit) =
                     Html.button [
                         prop.className
                             "flex-1 rounded bg-emerald-800 px-3 py-1.5 text-sm text-white hover:bg-emerald-700"
+                        prop.title "Start a new note (Ctrl+N)"
+                        prop.onClick (fun _ -> onNewNote ())
+                        prop.text "+ New note"
+                    ]
+                    Html.button [
+                        prop.className
+                            "rounded border border-stone-300 px-2.5 py-1.5 text-sm text-emerald-800 hover:bg-stone-200 dark:border-stone-600 dark:text-emerald-300 dark:hover:bg-stone-700"
                         prop.title "Open today's daily note (Ctrl+D)"
                         prop.onClick (fun _ -> api.OpenToday ())
                         prop.text "Today"
@@ -92,7 +99,7 @@ let Sidebar (api: NotesApi) (onGraph: unit -> unit) =
                     prop.children [
                         sectionTitle (sprintf "Notes (%i)" api.Notes.Length)
                         if api.Notes.Length = 0 then
-                            mutedNote "No notes yet — hit Today to start."
+                            mutedNote "No notes yet — hit New note or Today to start."
                         yield! api.Notes |> Array.toList |> List.map (fun n -> noteButton "note-" n.Name)
                     ]
                 ]

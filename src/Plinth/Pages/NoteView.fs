@@ -257,6 +257,9 @@ let NoteView () =
     let graphData, setGraphData = React.useState<GraphData option> None
     let showPalette, setShowPalette = React.useState false
     let showRename, setShowRename = React.useState false
+    let showNewNote, setShowNewNote = React.useState false
+    let showShortcuts, setShowShortcuts = React.useState false
+    let justSaved, setJustSaved = React.useState false
 
     let currentName =
         match api.Current with
@@ -294,7 +297,8 @@ let NoteView () =
         | EditingNote _ -> true
         | _ -> false
 
-    // Ctrl/Cmd+D opens (creating if needed) today's daily note.
+    // Ctrl/Cmd+D opens (creating if needed) today's daily note;
+    // Ctrl/Cmd+N asks for a name and opens that.
     let keyboardEffect () : unit -> unit =
         let handler (e: Browser.Types.Event) =
             let ke = e :?> Browser.Types.KeyboardEvent
@@ -302,11 +306,29 @@ let NoteView () =
             if (ke.ctrlKey || ke.metaKey) && ke.key.ToLowerInvariant() = "d" then
                 ke.preventDefault ()
                 api.OpenToday ()
+            elif (ke.ctrlKey || ke.metaKey) && ke.key.ToLowerInvariant() = "n" then
+                ke.preventDefault ()
+                setShowNewNote true
+            elif (ke.ctrlKey || ke.metaKey) && ke.key.ToLowerInvariant() = "s" then
+                // Stop the browser's Save Page dialog in dev mode too.
+                ke.preventDefault ()
+                api.SaveNow ()
+                setJustSaved true
 
         window.addEventListener ("keydown", handler)
         fun () -> window.removeEventListener ("keydown", handler)
 
     React.useEffect (keyboardEffect, [||])
+
+    // The "saved ✓" acknowledgement fades on its own.
+    let savedFlashEffect () : unit -> unit =
+        if justSaved then
+            let timer = Fable.Core.JS.setTimeout (fun () -> setJustSaved false) 1400
+            fun () -> Fable.Core.JS.clearTimeout timer
+        else
+            ignore
+
+    React.useEffect (savedFlashEffect, [| box justSaved |])
 
     // Ctrl/Cmd+K palette and Ctrl/Cmd+G Firmament. Re-bound whenever
     // the toggles change so the handler never closes over stale state.
@@ -333,9 +355,13 @@ let NoteView () =
 
     let paletteActions: Palette.PaletteAction list =
         [ yield
-              { Palette.PaletteAction.Label = "Open today's daily note"
-                Palette.PaletteAction.Hint = "Ctrl+D"
-                Palette.PaletteAction.Run = api.OpenToday }
+              { Palette.PaletteAction.Label = "New note…"
+                Palette.PaletteAction.Hint = "Ctrl+N"
+                Palette.PaletteAction.Run = fun () -> setShowNewNote true }
+          yield
+              { Label = "Open today's daily note"
+                Hint = "Ctrl+D"
+                Run = api.OpenToday }
           yield
               { Label = "Open the Firmament"
                 Hint = "Ctrl+G"
@@ -357,6 +383,10 @@ let NoteView () =
                       settings.SetTheme (
                           if settings.Theme = Dark then Light else Dark
                       ) }
+          yield
+              { Label = "Keyboard shortcuts…"
+                Hint = "help"
+                Run = fun () -> setShowShortcuts true }
           yield
               { Label = "Export vault as .zip…"
                 Hint = "vault"
@@ -387,11 +417,16 @@ let NoteView () =
                                         "font-serif text-xl font-bold tracking-tight text-emerald-900 dark:text-emerald-300"
                                     prop.text "Plinth"
                                 ]
-                                Settings.SettingsMenu settings api.Vault api.PickVault api.ExportVault
+                                Settings.SettingsMenu
+                                    settings
+                                    api.Vault
+                                    api.PickVault
+                                    api.ExportVault
+                                    (fun () -> setShowShortcuts true)
                             ]
                         ]
                         Search.SearchBox search api.OpenNote
-                        Sidebar.Sidebar api openGraph
+                        Sidebar.Sidebar api (fun () -> setShowNewNote true) openGraph
                     ]
                 ]
 
@@ -447,7 +482,9 @@ let NoteView () =
                                 { Name = name
                                   Content = content
                                   Dirty = api.Dirty
+                                  JustSaved = justSaved
                                   FontPx = settings.EditorPx
+                                  NoteNames = api.Notes |> Array.map (fun n -> n.Name)
                                   NoteExists = noteExists
                                   OnChange = api.UpdateContent
                                   OnLink = api.OpenNote
@@ -480,6 +517,12 @@ let NoteView () =
                           Actions = paletteActions
                           OnOpen = api.OpenNote
                           OnClose = fun () -> setShowPalette false }
+
+                if showNewNote then
+                    Editor.NewNoteDialog noteExists api.OpenNote (fun () -> setShowNewNote false)
+
+                if showShortcuts then
+                    Settings.ShortcutsDialog (fun () -> setShowShortcuts false)
 
                 match api.Current with
                 | EditingNote(name, _) when showRename ->

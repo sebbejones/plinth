@@ -27,6 +27,8 @@ type NotesApi =
       OpenNote: string -> unit
       OpenToday: unit -> unit
       UpdateContent: string -> unit
+      /// Flush the pending autosave right now (Ctrl+S).
+      SaveNow: unit -> unit
       DeleteNote: string -> unit
       /// Rename the current note. Resolves to Some error when it failed.
       RenameNote: string -> JS.Promise<string option>
@@ -185,6 +187,49 @@ let useNotes () : NotesApi =
             setCurrent (EditingNote(name, text))
         | _ -> ()
 
+    /// The one place a note is written. Both the debounced autosave and an
+    /// explicit Ctrl+S come through here, so a save racing an external edit
+    /// is handled identically no matter which triggered it.
+    let performSave (name: string) (content: string) =
+        let gen = editGen.current
+
+        // The freshest local text at the time the save result arrives —
+        // never park stale text in a conflict state.
+        let latestLocal () =
+            match currentRef.current with
+            | EditingNote(n, c) when n = name -> c
+            | _ -> content
+
+        promise {
+            try
+                let! result = Tauri.writeFile name content baseHash.current
+
+                match result.Status with
+                | "saved" ->
+                    setNotes result.Notes
+                    baseHash.current <- Some result.Hash
+                    let! bl = Tauri.getBacklinks name
+                    setBacklinks bl
+                    do! refreshTags ()
+
+                    if editGen.current = gen then
+                        setDirty false
+                | "conflict" -> setCurrent (ConflictNote(name, latestLocal (), result.Disk))
+                | "missing" -> setCurrent (DeletedNote(name, Some(latestLocal ())))
+                | _ -> ()
+            with ex ->
+                setCurrent (NoteError(Tauri.errorText ex))
+        }
+        |> Promise.start
+
+    /// Ctrl+S. Autosave already guarantees the file lands shortly after the
+    /// last keystroke, so this changes nothing about safety — it exists
+    /// because the habit is universal and silence reads as data loss.
+    let saveNow () =
+        match currentRef.current with
+        | EditingNote(name, content) -> performSave name content
+        | _ -> ()
+
     // Debounced autosave, 700 ms after the last keystroke. The effect's
     // cleanup cancels the pending timer whenever the content changes again.
     // A save that discovers an external edit or deletion switches to the
@@ -193,42 +238,7 @@ let useNotes () : NotesApi =
     let autosaveEffect () : unit -> unit =
         match current, dirty with
         | EditingNote(name, content), true ->
-            let timer =
-                JS.setTimeout
-                    (fun () ->
-                        let gen = editGen.current
-
-                        // The freshest local text at the time the save
-                        // result arrives — never park stale text in a
-                        // conflict state.
-                        let latestLocal () =
-                            match currentRef.current with
-                            | EditingNote(n, c) when n = name -> c
-                            | _ -> content
-
-                        promise {
-                            try
-                                let! result = Tauri.writeFile name content baseHash.current
-
-                                match result.Status with
-                                | "saved" ->
-                                    setNotes result.Notes
-                                    baseHash.current <- Some result.Hash
-                                    let! bl = Tauri.getBacklinks name
-                                    setBacklinks bl
-                                    do! refreshTags ()
-
-                                    if editGen.current = gen then
-                                        setDirty false
-                                | "conflict" -> setCurrent (ConflictNote(name, latestLocal (), result.Disk))
-                                | "missing" -> setCurrent (DeletedNote(name, Some(latestLocal ())))
-                                | _ -> ()
-                            with ex ->
-                                setCurrent (NoteError(Tauri.errorText ex))
-                        }
-                        |> Promise.start)
-                    700
-
+            let timer = JS.setTimeout (fun () -> performSave name content) 700
             fun () -> JS.clearTimeout timer
         | _ -> ignore
 
@@ -520,6 +530,7 @@ let useNotes () : NotesApi =
       OpenNote = openNote
       OpenToday = openToday
       UpdateContent = updateContent
+      SaveNow = saveNow
       DeleteNote = deleteNote
       RenameNote = renameNote
       KeepLocalVersion = keepLocalVersion

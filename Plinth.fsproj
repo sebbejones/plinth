@@ -12,6 +12,7 @@
     <Compile Include="src/Plinth/Tauri.fs" />
     <Compile Include="src/Plinth/Utils/Date.fs" />
     <Compile Include="src/Plinth/Utils/Markdown.fs" />
+    <Compile Include="src/Plinth/Utils/Fuzzy.fs" />
     <Compile Include="src/Plinth/Hooks/UseNotes.fs" />
     <Compile Include="src/Plinth/Hooks/UseSearch.fs" />
     <Compile Include="src/Plinth/Hooks/UseSettings.fs" />

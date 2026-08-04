@@ -26,12 +26,77 @@ let private segButton (active: bool) (label: string) (onClick: unit -> unit) =
         prop.text label
     ]
 
+/// Every shortcut in one place. The command palette lists most of them
+/// too, but only once you already know Ctrl+K — so this is reachable with
+/// the mouse alone.
+let private shortcuts =
+    [ "Ctrl+N", "New note"
+      "Ctrl+D", "Today's daily note"
+      "Ctrl+K", "Command palette"
+      "Ctrl+G", "The Firmament"
+      "Ctrl+S", "Save now (Plinth also autosaves)"
+      "[[", "Link to a note — a menu of names appears"
+      "Esc", "Close whatever is open" ]
+
+let ShortcutsDialog (onClose: unit -> unit) =
+    Html.div [
+        prop.className "absolute inset-0 z-50 bg-black/30"
+        prop.onClick (fun _ -> onClose ())
+        prop.children [
+            Html.div [
+                prop.className
+                    "mx-auto mt-[18vh] w-full max-w-sm rounded-xl border border-stone-200 bg-white p-5 shadow-2xl dark:border-stone-600 dark:bg-stone-800"
+                prop.onClick (fun e -> e.stopPropagation ())
+                prop.children [
+                    Html.h2 [
+                        prop.className "font-serif text-lg font-semibold text-stone-800 dark:text-stone-100"
+                        prop.text "Keyboard shortcuts"
+                    ]
+                    Html.div [
+                        prop.className "mt-3 flex flex-col gap-1.5"
+                        prop.children (
+                            shortcuts
+                            |> List.map (fun (keys, what) ->
+                                Html.div [
+                                    prop.key keys
+                                    prop.className "flex items-baseline justify-between gap-4"
+                                    prop.children [
+                                        Html.span [
+                                            prop.className "text-sm text-stone-600 dark:text-stone-300"
+                                            prop.text what
+                                        ]
+                                        Html.kbd [
+                                            prop.className
+                                                "flex-none rounded border border-stone-300 bg-stone-100 px-1.5 py-0.5 font-mono text-xs text-stone-600 dark:border-stone-600 dark:bg-stone-900 dark:text-stone-300"
+                                            prop.text keys
+                                        ]
+                                    ]
+                                ])
+                        )
+                    ]
+                    Html.div [
+                        prop.className "mt-4 flex justify-end"
+                        prop.children [
+                            Html.button [
+                                prop.className
+                                    "rounded bg-emerald-800 px-3 py-1 text-sm text-white hover:bg-emerald-700"
+                                prop.onClick (fun _ -> onClose ())
+                                prop.text "Close"
+                            ]
+                        ]
+                    ]
+                ]
+            ]
+        ]
+    ]
+
 [<ReactComponent>]
 let SettingsMenu
     (settings: SettingsApi)
     (vault: string option)
     (onChangeVault: unit -> unit)
     (onExport: unit -> unit)
+    (onShortcuts: unit -> unit)
     =
     let isOpen, setOpen = React.useState false
 
@@ -71,6 +136,14 @@ let SettingsMenu
                         Html.div [
                             prop.className "mt-1 border-t border-stone-200 px-4 pt-2 dark:border-stone-700"
                             prop.children [
+                                Html.button [
+                                    prop.className
+                                        "block w-full rounded px-2 py-1.5 text-left text-sm text-stone-600 hover:bg-stone-100 dark:text-stone-300 dark:hover:bg-stone-700"
+                                    prop.onClick (fun _ ->
+                                        setOpen false
+                                        onShortcuts ())
+                                    prop.text "Keyboard shortcuts…"
+                                ]
                                 Html.button [
                                     prop.className
                                         "block w-full rounded px-2 py-1.5 text-left text-sm text-stone-600 hover:bg-stone-100 dark:text-stone-300 dark:hover:bg-stone-700"

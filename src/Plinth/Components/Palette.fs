@@ -6,6 +6,7 @@ module Plinth.Components.Palette
 
 open Feliz
 open Plinth.Types
+open Plinth.Utils
 
 type PaletteAction =
     { Label: string
@@ -24,29 +25,6 @@ type private Item =
     | CreateItem of name: string
     | ActionItem of PaletteAction
 
-/// Prefix beats substring beats subsequence; a longer contiguous run
-/// inside a subsequence match ranks it higher ("plnth" finds "Plinth").
-let private score (query: string) (name: string) =
-    let q = query.ToLowerInvariant()
-    let n = name.ToLowerInvariant()
-
-    if n.StartsWith q then 120
-    elif n.Contains q then 90
-    else
-        let mutable qi = 0
-        let mutable streak = 0
-        let mutable best = 0
-
-        for ch in n do
-            if qi < q.Length && ch = q.[qi] then
-                qi <- qi + 1
-                streak <- streak + 1
-                best <- max best streak
-            else
-                streak <- 0
-
-        if qi = q.Length && q.Length > 0 then 40 + best else 0
-
 [<ReactComponent>]
 let Palette (props: PaletteProps) =
     let query, setQuery = React.useState ""
@@ -61,14 +39,10 @@ let Palette (props: PaletteProps) =
         else
             let noteHits =
                 props.Notes
-                |> Array.choose (fun n ->
-                    match score q n.Name with
-                    | 0 -> None
-                    | s -> Some(s, n.Name))
-                |> Array.sortByDescending fst
-                |> Array.truncate 8
+                |> Array.map (fun n -> n.Name)
+                |> Fuzzy.rank 8 q
                 |> Array.toList
-                |> List.map (fun (_, name) -> NoteItem(name, "note"))
+                |> List.map (fun name -> NoteItem(name, "note"))
 
             let actionHits =
                 props.Actions

@@ -1,8 +1,45 @@
 # Plinth — Next Steps
 
-Status as of 2026-07-23: **v0.3.0 — "The Foundation Holds" — is BUILT and
-committed locally on branch `release/v0.3.0`, awaiting Sebbe's push, tag,
-and GitHub release.** v0.2.0 remains the published release until then.
+Status as of 2026-08-03: **v0.3.0 is published** — tagged, released on
+GitHub as "the Foundation Holds", installer attached. On top of it, `main`
+now carries **unreleased UX work** (see below) that is committed but has
+never been built into an installer. Anyone downloading v0.3.0 today does
+not have it.
+
+## Unreleased on main — the note-creation and linking pass (2026-08-03)
+
+Prompted by Sebbe noticing there was no visible way to start a new note
+after finishing one. All four changes are the same shape: the machinery
+already existed, the affordance didn't.
+
+- **New note** as a real button in the sidebar (now the primary action,
+  with Today beside it), plus `Ctrl+N` and a palette entry. The dialog
+  refuses `/ \ : ..` and, for a name that already exists, changes its
+  button from Create to Open rather than erroring.
+- **`[[` opens a note menu at the cursor.** The biggest of the four:
+  links are the backbone of backlinks and the Firmament, but linking
+  previously meant recalling a note's exact spelling. Arrow/click to
+  choose, Enter or Tab to accept, `]]` closed automatically. The palette's
+  ranking moved to `Utils/Fuzzy.fs` so both matchers behave identically.
+  Caret position is measured with a hidden mirror div — a textarea exposes
+  no caret geometry and this one soft-wraps. That measurement is the most
+  fragile part of the pass; if the menu ever sits wrong, look there first.
+- **`Ctrl+S` saves and acknowledges it** ("saved ✓" for ~1.4 s). Autosave
+  already made this unnecessary for safety; silence after a universal
+  habit read as data loss in an app selling durability. Autosave and
+  Ctrl+S now share one `performSave`, so neither can bypass the v0.3.0
+  conflict checks.
+- **Keyboard shortcuts are discoverable** — ⚙ → "Keyboard shortcuts…"
+  and a palette entry. Previously every shortcut was listed only in the
+  palette, which you had to know a shortcut to open.
+
+Verified in browser dev mode: full round trip of typing `[[tyr`, picking
+the suggestion, autosave, and the backlink appearing on the target note;
+the exists/illegal-name branches of the New note dialog; the saved ✓
+sequence via a DOM observer. Clean Fable compile, no console errors.
+**Not yet exercised in the real Tauri build** — worth doing before any
+release, particularly `Ctrl+N`/`Ctrl+S` (no browser chrome to intercept
+them there) and the caret-menu position at each font size.
 
 ## v0.3.0 — what was done (2026-07-23)
 
@@ -57,16 +94,8 @@ Known limitations (also in the release notes): external rename appears as
 delete+create; big-vault open time scales with file count; the flat model
 is a feature, not a bug.
 
-## To publish v0.3.0 (Sebbe)
-
-```
-git push -u origin release/v0.3.0     # or merge to main first
-git tag v0.3.0
-git push origin v0.3.0
-```
-
-Then draft the GitHub release from RELEASE-NOTES-v0.3.0.md and upload
-`src-tauri/target/release/bundle/nsis/Plinth_0.3.0_x64-setup.exe`.
+**DONE 2026-07-30.** Pushed, tagged `v0.3.0`, released on GitHub as
+"v0.3.0: the Foundation Holds" with `Plinth_0.3.0_x64-setup.exe` attached.
 
 ## Decided 2026-07-18 (Sebbe): Plinth is FREE and open source
 
@@ -111,6 +140,9 @@ happen there.
 
 ## Still open
 
+0. Decide whether the unreleased UX pass above becomes **v0.3.1** (it is
+   additive, no format or behaviour change) and cut it. Until then the
+   README describes features no downloaded build has.
 1. Decide on code signing (removes the "Windows protected your PC" warning).
    Azure Trusted Signing is the current low-cost route. Not a blocker — the
    landing page already explains the warning to first-time downloaders.
@@ -126,7 +158,7 @@ fixed, and regression-tested in v0.3.0.)
 
 ## How to pick up next session
 
-Open this file. v0.3.0 is built and committed on `release/v0.3.0` but NOT
-pushed — publication (push, tag, GitHub release, installer upload) is
-deliberately left to Sebbe; the exact commands are above. After that, the
-"Still open" list is what remains.
+Open this file. v0.3.0 is out. `main` has the unreleased UX pass on top of
+it, verified in dev mode but never built as an installer — so the first
+question is whether to test it in the real Tauri app and cut v0.3.1. After
+that, the "Still open" list is what remains.

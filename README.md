@@ -23,9 +23,10 @@ And a tool for thinking should never grow a marketplace.
 ## What it does
 
 - **Daily notes** open to today automatically, so capture is one keystroke away
-- **Wiki links** connect ideas with `[[Note Name]]` as you type
+- **Wiki links** connect ideas with `[[Note Name]]` as you type — typing `[[` opens a menu of your notes at the cursor, so linking never means remembering exactly how you spelled something
 - **Backlinks** show every note that points back, so structure emerges on its own
 - **The Firmament** (`Ctrl+G`) draws the whole vault as a living star map: every note a star, every link a line, daily notes in amber, broken links as dim "unborn" stars. Drag, zoom, click a star to open it. (*Firmament*, in the old sense: the vault of heaven.)
+- **New notes** from a button, `Ctrl+N`, the command palette, or just by linking to a name that doesn't exist yet
 - **Command palette** (`Ctrl+K`) fuzzy-jumps to any note, creates one that doesn't exist yet, or runs an app action, all without the mouse
 - **Tags** with a `#tag` explorer to slice across your notes
 - **Full-text search** across everything, instant
@@ -43,10 +44,15 @@ And a tool for thinking should never grow a marketplace.
 
 | Keys | Action |
 | --- | --- |
+| `Ctrl+N` | Start a new note |
 | `Ctrl+D` | Open (or create) today's daily note |
-| `Ctrl+G` | Open the Firmament |
 | `Ctrl+K` | Open the command palette |
-| `Esc` | Close the Firmament or palette |
+| `Ctrl+G` | Open the Firmament |
+| `Ctrl+S` | Save now (Plinth autosaves anyway) |
+| `[[` | Link to a note — a menu of names opens at the cursor |
+| `Esc` | Close the Firmament, palette, or link menu |
+
+The same list lives in the app, under ⚙ → "Keyboard shortcuts…".
 
 ## How the vault works
 
