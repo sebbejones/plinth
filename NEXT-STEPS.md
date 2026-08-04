@@ -1,12 +1,9 @@
 # Plinth — Next Steps
 
-Status as of 2026-08-03: **v0.3.0 is published** — tagged, released on
-GitHub as "the Foundation Holds", installer attached. On top of it, `main`
-now carries **unreleased UX work** (see below) that is committed but has
-never been built into an installer. Anyone downloading v0.3.0 today does
-not have it.
+Status as of 2026-08-04: **v0.3.1 is published** — the note-creation and
+linking pass below, tested in the real desktop build and released.
 
-## Unreleased on main — the note-creation and linking pass (2026-08-03)
+## v0.3.1 — the note-creation and linking pass (2026-08-04)
 
 Prompted by Sebbe noticing there was no visible way to start a new note
 after finishing one. All four changes are the same shape: the machinery
@@ -37,9 +34,26 @@ Verified in browser dev mode: full round trip of typing `[[tyr`, picking
 the suggestion, autosave, and the backlink appearing on the target note;
 the exists/illegal-name branches of the New note dialog; the saved ✓
 sequence via a DOM observer. Clean Fable compile, no console errors.
-**Not yet exercised in the real Tauri build** — worth doing before any
-release, particularly `Ctrl+N`/`Ctrl+S` (no browser chrome to intercept
-them there) and the caret-menu position at each font size.
+
+**Also exercised in the real 0.3.1 desktop build** against a scratch
+vault (2026-08-04): the New note button and dialog created a real file on
+disk; `Ctrl+N` opened the dialog; the `[[` menu rendered at the caret and
+still tracked it correctly at Large font size; the accepted link was
+written to the `.md` file and the backlink appeared on the target note;
+⚙ → Keyboard shortcuts rendered. 19 Rust tests pass.
+
+One thing was *not* photographed in the real app: the "saved ✓" flash
+lasts ~1.4 s, which is shorter than a screenshot round trip, so every
+capture caught the settled "saved" state. `Ctrl+S` reaching the app is
+established (`Ctrl+N` goes through the identical window listener) and the
+flash itself was verified in dev mode with a DOM observer — but if you
+want to see it, press `Ctrl+S` yourself and watch the header.
+
+A trap for next time: `open_application "Plinth"` launches the *installed*
+build, not the one in `src-tauri/target/release/`. Two instances ran
+side by side and the first round of "testing" was against v0.3.0 without
+the new features. Check `(Get-Process plinth).Path` before trusting what
+is on screen.
 
 ## v0.3.0 — what was done (2026-07-23)
 
@@ -140,9 +154,6 @@ happen there.
 
 ## Still open
 
-0. Decide whether the unreleased UX pass above becomes **v0.3.1** (it is
-   additive, no format or behaviour change) and cut it. Until then the
-   README describes features no downloaded build has.
 1. Decide on code signing (removes the "Windows protected your PC" warning).
    Azure Trusted Signing is the current low-cost route. Not a blocker — the
    landing page already explains the warning to first-time downloaders.
@@ -158,7 +169,5 @@ fixed, and regression-tested in v0.3.0.)
 
 ## How to pick up next session
 
-Open this file. v0.3.0 is out. `main` has the unreleased UX pass on top of
-it, verified in dev mode but never built as an installer — so the first
-question is whether to test it in the real Tauri app and cut v0.3.1. After
-that, the "Still open" list is what remains.
+Open this file. v0.3.1 is out and `main` is clean — nothing is pending.
+The "Still open" list is what remains, and none of it is urgent.
