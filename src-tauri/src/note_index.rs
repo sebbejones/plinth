@@ -99,10 +99,18 @@ pub fn open(db_path: &Path) -> rusqlite::Result<Connection> {
 /// the user should know about files that were left alone.
 pub struct VaultScan {
     /// Read by tests and available to callers; the command layer only
-    /// forwards the warnings.
+    /// forwards the warnings and notices.
     #[allow(dead_code)]
     pub notes_indexed: usize,
+    /// Something the user has to act on before Plinth can do what they
+    /// meant — two files claiming one note name, an index write that
+    /// failed. Shown in alarm colours.
     pub warnings: Vec<String>,
+    /// Something worth knowing that is working as designed. Pointing
+    /// Plinth at a folder of nested Markdown is the ordinary first move
+    /// for a newcomer; saying so in the same red as a real fault teaches
+    /// them their folder is broken when it is fine.
+    pub notices: Vec<String>,
 }
 
 /// Rebuild the whole index from the vault folder. The vault model is flat:
@@ -139,7 +147,7 @@ fn reindex_vault_inner(conn: &Connection, vault: &Path) -> Result<VaultScan, Str
             candidates.push(path);
         }
     }
-    let (unique, mut warnings) = partition_root_files(candidates);
+    let (unique, warnings) = partition_root_files(candidates);
 
     let mut count = 0;
     for path in unique {
@@ -175,13 +183,16 @@ fn reindex_vault_inner(conn: &Connection, vault: &Path) -> Result<VaultScan, Str
             }
         }
     }
+    let mut notices = Vec::new();
     if !nested.is_empty() {
         let sample: Vec<&str> = nested.iter().take(3).map(|s| s.as_str()).collect();
         let suffix = if nested.len() > 3 { ", …" } else { "" };
-        warnings.push(format!(
-            "{} Markdown file(s) in subfolders were left untouched and not indexed \
-             ({}{}). Plinth reads notes from the vault root only — move a file to the \
-             vault root to make it a note.",
+        // Deliberately phrased as what Plinth did, not what it skipped: the
+        // subfolders are untouched, which is the promise, not a failure.
+        notices.push(format!(
+            "Your subfolders are yours — Plinth left them exactly as they are, including \
+             {} Markdown file(s) inside them ({}{}). Notes come from the top level of this \
+             folder only, so move a file up here if you want Plinth to treat it as a note.",
             nested.len(),
             sample.join(", "),
             suffix
@@ -191,6 +202,7 @@ fn reindex_vault_inner(conn: &Connection, vault: &Path) -> Result<VaultScan, Str
     Ok(VaultScan {
         notes_indexed: count,
         warnings,
+        notices,
     })
 }
 
@@ -690,10 +702,12 @@ mod tests {
             .collect();
         assert_eq!(names, vec!["Root Note", "Second"]);
 
-        // The nested files are reported (but .plinth/.hidden contents are not).
-        assert_eq!(scan.warnings.len(), 1);
-        assert!(scan.warnings[0].contains("2 Markdown file(s) in subfolders"));
-        assert!(scan.warnings[0].contains("Nested.md"));
+        // The nested files are reported (but .plinth/.hidden contents are not),
+        // as a notice rather than a warning: nothing here needs fixing.
+        assert!(scan.warnings.is_empty());
+        assert_eq!(scan.notices.len(), 1);
+        assert!(scan.notices[0].contains("2 Markdown file(s)"));
+        assert!(scan.notices[0].contains("Nested.md"));
 
         // Nothing on disk was moved, deleted, or rewritten.
         assert_eq!(

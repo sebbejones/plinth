@@ -31,16 +31,42 @@ let private confirmRaw (message: string) (options: obj) : JS.Promise<bool> = jsN
 [<Import("message", "@tauri-apps/plugin-dialog")>]
 let private messageRaw (message: string) (options: obj) : JS.Promise<unit> = jsNative
 
+[<Import("openUrl", "@tauri-apps/plugin-opener")>]
+let private openUrlRaw (url: string) : JS.Promise<unit> = jsNative
+
 [<Import("listen", "@tauri-apps/api/event")>]
 let private listenRaw (event: string) (handler: {| payload: obj |} -> unit) : JS.Promise<unit -> unit> =
     jsNative
 
-/// Ask the user to pick the vault folder. None if they cancelled.
-let pickFolder () : JS.Promise<string option> =
+/// Ask the user to pick a folder. `title` carries the whole difference
+/// between starting a new notebook and opening one that already exists —
+/// the picker is the same either way. None if they cancelled.
+let pickFolder (title: string) : JS.Promise<string option> =
     openDialog
         {| directory = true
            multiple = false
-           title = "Choose your Plinth vault folder" |}
+           title = title |}
+
+/// Write the sample notebook into Documents (or find the one already
+/// there). Does not open it; the caller runs `setVault` on the path.
+let createSampleVault (today: string) : JS.Promise<SampleVault> =
+    invoke "create_sample_vault" {| today = today |}
+
+/// Hand a web link to the OS browser. The scheme is checked here as well as
+/// in the renderer and in the capability scope: a note is user content, and
+/// this is the one place it reaches outside the app.
+let openExternal (url: string) : JS.Promise<unit> =
+    let u = url.Trim()
+    // Case-insensitive, like the renderer's regex — "HTTPS://" is a valid URL
+    // and an exact-case check would drop it on the floor without a word.
+    let lower = u.ToLowerInvariant()
+
+    if lower.StartsWith("http://")
+       || lower.StartsWith("https://")
+       || lower.StartsWith("mailto:") then
+        openUrlRaw u
+    else
+        Promise.lift ()
 
 /// Native yes/no confirmation dialog.
 let confirmDialog (message: string) : JS.Promise<bool> =
@@ -75,9 +101,10 @@ let readFile (name: string) : JS.Promise<NoteContent> =
 let loadNote (name: string) : JS.Promise<NoteContent option> =
     invoke "load_note" {| name = name |}
 
-/// Delete a note's file; returns the refreshed note list.
-let deleteFile (name: string) : JS.Promise<NoteMeta[]> =
-    invoke "delete_file" {| name = name |}
+/// Delete a note's file. By default it goes to the Recycle Bin; `permanent`
+/// skips the bin, which is only for the retry after an "unsupported" result.
+let deleteFile (name: string) (permanent: bool) : JS.Promise<DeleteOutcome> =
+    invoke "delete_file" {| name = name; permanent = permanent |}
 
 /// Save a note without clobbering external edits: `baseHash` is the hash of
 /// the disk content last seen; pass None to write unconditionally (only

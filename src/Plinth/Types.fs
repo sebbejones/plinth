@@ -8,12 +8,19 @@ type NoteMeta = { Name: string; Path: string }
 /// detect external edits.
 type NoteContent = { Name: string; Content: string; Hash: string }
 
-/// What opening a vault returned: notes, scan warnings (nested markdown
-/// files, duplicate names), and whether filesystem watching started.
+/// What opening a vault returned: notes, scan warnings (things to act on,
+/// like two files claiming one note name), notices (things working as
+/// designed, like Markdown left alone in subfolders), and whether
+/// filesystem watching started.
 type VaultInfo =
     { Notes: NoteMeta[]
       Warnings: string[]
+      Notices: string[]
       WatcherError: string option }
+
+/// Where the sample notebook lives, and whether this call created it.
+/// Created = false means one was already there and was left untouched.
+type SampleVault = { Path: string; Created: bool }
 
 /// Outcome of a conflict-checked save. Status is "saved" (Notes + Hash are
 /// fresh), "conflict" (Disk holds the current file content), or "missing"
@@ -23,6 +30,14 @@ type WriteResult =
       Notes: NoteMeta[]
       Hash: string
       Disk: string }
+
+/// Outcome of a delete. Status is "recycled" (the file is in the Recycle
+/// Bin and can be restored), "deleted" (gone for good, because we asked
+/// for that), or "unsupported" (this drive has no Recycle Bin — nothing
+/// was deleted and the caller has to decide what to do).
+type DeleteOutcome =
+    { Status: string
+      Notes: NoteMeta[] }
 
 /// Outcome of a rename: fresh note list, the canonical new name, and how
 /// many [[links]] across the vault were rewritten.

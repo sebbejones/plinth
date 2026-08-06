@@ -1,5 +1,6 @@
 mod link_parser;
 mod note_index;
+mod sample;
 mod vault_ops;
 mod watcher;
 
@@ -24,14 +25,25 @@ pub struct NoteContent {
 }
 
 /// Everything the frontend needs after opening a vault: the note list,
-/// scan warnings (nested files, duplicate names), and whether filesystem
-/// watching could be started.
+/// scan warnings (duplicate names), informational notices (files left
+/// alone in subfolders), and whether filesystem watching could be started.
 #[derive(Serialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct VaultInfo {
     pub notes: Vec<NoteMeta>,
     pub warnings: Vec<String>,
+    pub notices: Vec<String>,
     pub watcher_error: Option<String>,
+}
+
+/// Where the sample notebook is, and whether this call is what put it
+/// there. `created: false` means one was already sitting on disk and was
+/// left exactly as the user left it.
+#[derive(Serialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct SampleVault {
+    pub path: String,
+    pub created: bool,
 }
 
 struct Vault {
@@ -123,6 +135,7 @@ fn set_vault(
     Ok(VaultInfo {
         notes,
         warnings: scan.warnings,
+        notices: scan.notices,
         watcher_error,
     })
 }
@@ -232,22 +245,78 @@ fn rename_note(
     })
 }
 
+/// What happened to a note the user asked to delete.
+///
+/// `status` is one of:
+/// - `recycled`    — the file went to the Recycle Bin and can be restored.
+/// - `deleted`     — the file was removed for good, because the caller asked.
+/// - `unsupported` — this drive has no Recycle Bin. **Nothing was deleted**;
+///   the caller decides whether to ask again for a permanent delete.
+#[derive(Serialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct DeleteOutcome {
+    pub status: String,
+    pub notes: Vec<NoteMeta>,
+}
+
 /// Delete a note's file and drop it from the index. Notes that linked to it
 /// keep their [[link]] text; those links just create the note again if clicked.
+///
+/// By default the file is moved to the Recycle Bin rather than destroyed, so
+/// a misclick is recoverable outside Plinth. `permanent` skips the bin, and
+/// is meant for the second pass after `unsupported` — not as the normal path.
 #[tauri::command]
-fn delete_file(name: String, state: State<AppState>) -> Result<Vec<NoteMeta>, String> {
+fn delete_file(
+    name: String,
+    permanent: bool,
+    state: State<AppState>,
+) -> Result<DeleteOutcome, String> {
     let name = name.trim().to_string();
     vault_ops::validate_note_name(&name)?;
     let self_events = state.self_events.clone();
     with_vault(&state, |v| {
+        let mut status = if permanent { "deleted" } else { "recycled" };
+
         if let Some((path, _)) = note_index::note_path(&v.conn, &name).map_err(|e| e.to_string())? {
+            // Announce the delete before doing it, so a fast watcher event
+            // can't arrive before Plinth has claimed it.
             if let Ok(mut se) = self_events.lock() {
                 se.note_delete(&path);
             }
-            fs::remove_file(&path).map_err(|e| e.to_string())?;
+
+            let outcome = if permanent {
+                fs::remove_file(&path).map_err(|e| e.to_string())
+            } else {
+                // The Recycle Bin doesn't exist everywhere — network shares and
+                // some removable drives have none. Rather than silently destroy
+                // a file the user expected to be able to restore, report back
+                // and let them choose.
+                trash::delete(&path).map_err(|e| e.to_string())
+            };
+
+            if let Err(e) = outcome {
+                if let Ok(mut se) = self_events.lock() {
+                    se.clear_delete(&path);
+                }
+                if permanent {
+                    return Err(e);
+                }
+                // The file is untouched, so the index still describes reality.
+                return Ok(DeleteOutcome {
+                    status: "unsupported".into(),
+                    notes: note_index::list_notes(&v.conn).map_err(|e| e.to_string())?,
+                });
+            }
+        } else {
+            // Nothing on disk to move; only the index row goes.
+            status = "deleted";
         }
+
         note_index::remove_note(&v.conn, &name).map_err(|e| e.to_string())?;
-        note_index::list_notes(&v.conn).map_err(|e| e.to_string())
+        Ok(DeleteOutcome {
+            status: status.into(),
+            notes: note_index::list_notes(&v.conn).map_err(|e| e.to_string())?,
+        })
     })
 }
 
@@ -259,6 +328,26 @@ fn get_recents(state: State<AppState>) -> Result<Vec<String>, String> {
 }
 
 /// Zip every visible file in the vault to `dest`. Returns the file count.
+/// Put a sample notebook in the user's Documents folder and report where.
+///
+/// `today` comes from the frontend so the daily note matches the clock the
+/// user is actually looking at. Does not open the vault: the caller runs
+/// `set_vault` on the returned path like any other folder, because that is
+/// all the sample is.
+#[tauri::command]
+fn create_sample_vault(today: String, app: tauri::AppHandle) -> Result<SampleVault, String> {
+    use tauri::Manager;
+    let parent = app
+        .path()
+        .document_dir()
+        .map_err(|_| "Couldn't find your Documents folder.".to_string())?;
+    let (path, created) = sample::ensure_sample(&parent, today.trim())?;
+    Ok(SampleVault {
+        path: path.to_string_lossy().to_string(),
+        created,
+    })
+}
+
 #[tauri::command]
 fn export_vault(dest: String, state: State<AppState>) -> Result<usize, String> {
     with_vault(&state, |v| export_zip(&v.root, Path::new(&dest)))
@@ -330,12 +419,16 @@ fn get_notes_by_tag(tag: String, state: State<AppState>) -> Result<Vec<String>, 
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        // Web links in a note open in the OS browser. Without this the
+        // WebView would navigate away and take the app with it.
+        .plugin(tauri_plugin_opener::init())
         .manage(AppState {
             vault: Arc::new(Mutex::new(None)),
             self_events: Arc::new(Mutex::new(watcher::SelfEvents::default())),
         })
         .invoke_handler(tauri::generate_handler![
             set_vault,
+            create_sample_vault,
             read_dir,
             read_file,
             load_note,
@@ -352,4 +445,54 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running Plinth");
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    /// The point of recycling instead of deleting is that the file can be got
+    /// back, so assert the stronger thing: after the delete, the note is gone
+    /// from the vault *and* present in the Recycle Bin under its old path.
+    #[test]
+    fn recycled_note_is_recoverable() {
+        let dir = std::env::temp_dir().join(format!("plinth-trash-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("Recoverable Note.md");
+        fs::write(&path, "# Recoverable\n").unwrap();
+
+        trash::delete(&path).expect("temp dir should be on a drive with a Recycle Bin");
+        assert!(!path.exists(), "the note should be gone from the vault");
+
+        // Match on the parent folder and the stem, not the full path: Windows
+        // records the shell *display* name, which drops the extension when
+        // "hide extensions for known file types" is on. That only affects
+        // reading the bin back, which is something Plinth never does — a
+        // restore from Explorer puts "Recoverable Note.md" back.
+        let items: Vec<_> = trash::os_limited::list()
+            .unwrap()
+            .into_iter()
+            .filter(|i| {
+                i.original_parent == dir && i.name.to_string_lossy().starts_with("Recoverable Note")
+            })
+            .collect();
+        assert!(
+            !items.is_empty(),
+            "the note should be in the Recycle Bin, restorable to its original folder"
+        );
+
+        // Don't leave test litter in the user's Recycle Bin — including from
+        // any earlier run of this test that failed before it could clean up.
+        let litter: Vec<_> = trash::os_limited::list()
+            .unwrap()
+            .into_iter()
+            .filter(|i| {
+                i.original_parent
+                    .to_string_lossy()
+                    .contains("plinth-trash-")
+            })
+            .collect();
+        trash::os_limited::purge_all(litter).ok();
+        fs::remove_dir_all(&dir).ok();
+    }
 }

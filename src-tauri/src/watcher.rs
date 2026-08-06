@@ -73,6 +73,16 @@ impl SelfEvents {
         self.deletes.push((key, Instant::now()));
     }
 
+    /// Retract a delete record for a deletion that was announced but then
+    /// didn't happen — a recycle that failed, say. Without this the file
+    /// still sits on disk while Plinth is primed to ignore its removal, so
+    /// a genuinely external delete inside the TTL would go unnoticed.
+    pub fn clear_delete(&mut self, path: &Path) {
+        self.prune();
+        let key = norm(path);
+        self.deletes.retain(|(p, _)| p != &key);
+    }
+
     /// True when `content` on disk is exactly what Plinth last wrote there.
     pub fn matches_write(&mut self, path: &Path, hash: &str) -> bool {
         self.prune();
@@ -344,6 +354,20 @@ mod tests {
         fs::create_dir_all(dir.join(".plinth")).unwrap();
         let conn = note_index::open(&dir.join(".plinth/index.db")).unwrap();
         (dir, conn)
+    }
+
+    #[test]
+    fn clearing_a_delete_unmasks_a_later_external_one() {
+        let path = Path::new("C:/v/Note.md");
+        let mut se = SelfEvents::default();
+
+        se.note_delete(path);
+        assert!(se.matches_delete(path));
+
+        // A recycle that failed leaves the file on disk. If the record stayed,
+        // a genuine external delete inside the TTL would be read as ours.
+        se.clear_delete(path);
+        assert!(!se.matches_delete(path));
     }
 
     #[test]

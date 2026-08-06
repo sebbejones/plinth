@@ -11,3 +11,160 @@ textarea::placeholder,
 input::placeholder {
   color: var(--color-stone-400);
 }
+
+/* --- Markdown preview ---------------------------------------------------
+   The preview is rendered to an HTML string by src/markdown.js, so its
+   elements arrive without utility classes and are styled here instead.
+   Inline colours for [[links]] and #tags stay in markdown.js, next to the
+   rules that emit them. */
+
+.plinth-preview > :first-child {
+  margin-top: 0;
+}
+
+.plinth-preview h1,
+.plinth-preview h2,
+.plinth-preview h3,
+.plinth-preview h4 {
+  font-weight: 600;
+  line-height: 1.25;
+}
+.plinth-preview h1 {
+  font-family: var(--font-serif);
+  font-size: 1.5rem;
+  font-weight: 700;
+  margin: 0.5rem 0 0.75rem;
+}
+.plinth-preview h2 {
+  font-size: 1.25rem;
+  margin: 1.25rem 0 0.5rem;
+}
+.plinth-preview h3 {
+  font-size: 1.125rem;
+  margin: 1rem 0 0.25rem;
+}
+.plinth-preview h4 {
+  font-size: 1rem;
+  margin: 1rem 0 0.25rem;
+}
+
+.plinth-preview p {
+  line-height: 1.7;
+  margin: 0.75rem 0;
+}
+
+.plinth-preview ul,
+.plinth-preview ol {
+  margin: 0.75rem 0;
+  padding-left: 1.5rem;
+}
+.plinth-preview ul {
+  list-style: disc;
+}
+.plinth-preview ol {
+  list-style: decimal;
+}
+/* Nested lists sit tighter and change marker, as they would in print. */
+.plinth-preview li > ul,
+.plinth-preview li > ol {
+  margin: 0.25rem 0;
+}
+.plinth-preview ul ul {
+  list-style: circle;
+}
+.plinth-preview ul ul ul {
+  list-style: square;
+}
+.plinth-preview li {
+  margin: 0.25rem 0;
+  line-height: 1.6;
+}
+
+/* Checklist items lose the bullet; the box is the marker. */
+.plinth-preview li.plinth-task {
+  list-style: none;
+  margin-left: -1.25rem;
+}
+.plinth-preview li.plinth-task input[type="checkbox"] {
+  accent-color: var(--color-emerald-700);
+  margin-right: 0.15rem;
+  vertical-align: middle;
+}
+
+.plinth-preview blockquote {
+  border-left: 3px solid var(--color-stone-300);
+  color: var(--color-stone-600);
+  font-style: italic;
+  margin: 1rem 0;
+  padding: 0.1rem 0 0.1rem 1rem;
+}
+
+.plinth-preview code {
+  background: var(--color-stone-100);
+  border-radius: 0.25rem;
+  font-size: 0.875em;
+  padding: 0.1em 0.35em;
+}
+.plinth-preview pre {
+  background: var(--color-stone-100);
+  border: 1px solid var(--color-stone-200);
+  border-radius: 0.5rem;
+  margin: 1rem 0;
+  overflow-x: auto;
+  padding: 0.75rem 1rem;
+}
+.plinth-preview pre code {
+  background: none;
+  font-size: 0.875rem;
+  padding: 0;
+}
+
+/* A wide table scrolls inside its own box rather than stretching the pane. */
+.plinth-preview table {
+  border-collapse: collapse;
+  display: block;
+  margin: 1rem 0;
+  max-width: 100%;
+  overflow-x: auto;
+  width: max-content;
+}
+.plinth-preview th,
+.plinth-preview td {
+  border: 1px solid var(--color-stone-300);
+  padding: 0.35rem 0.75rem;
+  text-align: left;
+}
+.plinth-preview th {
+  background: var(--color-stone-100);
+  font-weight: 600;
+}
+
+.plinth-preview hr {
+  border: 0;
+  border-top: 1px solid var(--color-stone-300);
+  margin: 1.5rem 0;
+}
+
+/* markdown-it renders ~~strikethrough~~ as <s>, not <del>. */
+.plinth-preview s,
+.plinth-preview del {
+  color: var(--color-stone-500);
+}
+
+.dark .plinth-preview blockquote {
+  border-left-color: var(--color-stone-600);
+  color: var(--color-stone-400);
+}
+.dark .plinth-preview code,
+.dark .plinth-preview pre,
+.dark .plinth-preview th {
+  background: var(--color-stone-800);
+}
+.dark .plinth-preview pre {
+  border-color: var(--color-stone-700);
+}
+.dark .plinth-preview th,
+.dark .plinth-preview td,
+.dark .plinth-preview hr {
+  border-color: var(--color-stone-700);
+}

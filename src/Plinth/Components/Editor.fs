@@ -19,6 +19,7 @@ type EditorProps =
       OnChange: string -> unit
       OnLink: string -> unit
       OnTag: string -> unit
+      OnExternal: string -> unit
       OnDelete: unit -> unit
       OnRenameClick: unit -> unit }
 
@@ -467,7 +468,7 @@ let Editor (props: EditorProps) =
                             Html.button [
                                 prop.className
                                     "rounded border border-red-200 px-3 py-1 text-sm text-red-600 hover:bg-red-50 dark:border-red-900 dark:text-red-400 dark:hover:bg-red-950"
-                                prop.title "Delete this note"
+                                prop.title "Move this note to the Recycle Bin"
                                 prop.onClick (fun _ -> props.OnDelete ())
                                 prop.text "Delete"
                             ]
@@ -479,7 +480,9 @@ let Editor (props: EditorProps) =
                 Html.div [
                     prop.className "flex-1 overflow-y-auto px-6 py-4"
                     prop.style [ style.fontSize (length.px props.FontPx) ]
-                    prop.children [ Markdown.render props.Content props.NoteExists props.OnLink props.OnTag ]
+                    prop.children [
+                        Markdown.render props.Content props.NoteExists props.OnLink props.OnTag props.OnExternal
+                    ]
                 ]
             else
                 Html.div [

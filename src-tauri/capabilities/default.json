@@ -3,5 +3,17 @@
   "identifier": "default",
   "description": "Default permissions for the main window",
   "windows": ["main"],
-  "permissions": ["core:default", "dialog:default"]
+  "permissions": [
+    "core:default",
+    "dialog:default",
+    {
+      "identifier": "opener:allow-open-url",
+      "comment": "Web links in notes only. Deliberately narrower than the plugin's own default set, which also grants tel: and revealing files in the file manager. Mirrors SAFE_SCHEME in src/markdown.js, so the backend refuses anything the renderer wouldn't have marked.",
+      "allow": [
+        { "url": "http://*" },
+        { "url": "https://*" },
+        { "url": "mailto:*" }
+      ]
+    }
+  ]
 }

@@ -148,15 +148,51 @@ Slow morning. Started mapping out why [[Owning Your Data]] is the whole point, n
 
   const commands = {
     "plugin:dialog|open": () => "Demo Vault (in-memory)",
-    "plugin:dialog|confirm": () => true,
-    "plugin:dialog|message": () => null,
+    // plugin-dialog's confirm() is a wrapper over the `message` command: it
+    // returns the label of the button that was clicked and compares it to
+    // "Ok". Returning anything else here reads as Cancel, which silently
+    // turns every confirmed action in the browser demo into a no-op.
+    // (There is no `plugin:dialog|confirm` command — don't add one back.)
+    "plugin:dialog|message": () => "Ok",
     "plugin:dialog|save": () => null,
+    // The real app hands web links to the OS browser; in the demo just log,
+    // so a stray click can't navigate the page away from the app.
+    "plugin:opener|open_url": ({ url }) => {
+      console.info("devMock would open externally:", url);
+      return null;
+    },
     // The real app pushes watcher events; the browser demo has no
     // filesystem, so listeners are registered and never fire.
     "plugin:event|listen": () => 1,
     "plugin:event|unlisten": () => null,
 
-    set_vault: () => ({ Notes: list(), Warnings: [], WatcherError: null }),
+    set_vault: () => ({
+      Notes: list(),
+      Warnings: [],
+      // One notice, so the quiet explanatory banner is visible in the
+      // browser demo without having to build a folder to trigger it.
+      Notices: [
+        "Your subfolders are yours — Plinth left them exactly as they are, including 2 Markdown file(s) inside them (Archive/Old.md, Archive/Older.md). Notes come from the top level of this folder only, so move a file up here if you want Plinth to treat it as a note.",
+      ],
+      WatcherError: null,
+    }),
+
+    // There is no filesystem here, so the demo vault stands in for the
+    // sample folder. A stub landing note is added so the welcome screen's
+    // "open the sample, land on its first page" path is exercisable in the
+    // browser — the real content lives in src-tauri/src/sample.rs.
+    create_sample_vault: () => {
+      if (!notes.has("start here")) {
+        notes.set("start here", {
+          name: "Start here",
+          content:
+            "# Start here\n\nStand-in for the sample notebook's landing note. " +
+            "The real one is written by src-tauri/src/sample.rs.\n\n" +
+            "- [[Owning Your Data]]\n- [ ] Try typing `[[` here\n\n#plinth\n",
+        });
+      }
+      return { Path: "C:\\Users\\demo\\Documents\\Plinth Sample", Created: true };
+    },
     read_dir: () => list(),
 
     read_file: ({ name }) => {
@@ -220,12 +256,13 @@ Slow morning. Started mapping out why [[Owning Your Data]] is the whole point, n
       return { Notes: list(), Name: trimmed, LinksUpdated: linksUpdated };
     },
 
-    delete_file: ({ name }) => {
+    delete_file: ({ name, permanent }) => {
       const key = name.trim().toLowerCase();
       const note = notes.get(key);
       if (note) recents.delete(note.name);
       notes.delete(key);
-      return list();
+      // There is no Recycle Bin in a browser; report the real app's happy path.
+      return { Status: permanent ? "deleted" : "recycled", Notes: list() };
     },
 
     search: ({ query }) => {

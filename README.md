@@ -22,6 +22,7 @@ And a tool for thinking should never grow a marketplace.
 
 ## What it does
 
+- **Three ways to start** on the first screen — make a new notebook, open a folder of Markdown you already have, or try a sample notebook. The sample is five real notes in your Documents folder that teach the app by being used, not a tutorial you click through
 - **Daily notes** open to today automatically, so capture is one keystroke away
 - **Wiki links** connect ideas with `[[Note Name]]` as you type — typing `[[` opens a menu of your notes at the cursor, so linking never means remembering exactly how you spelled something
 - **Backlinks** show every note that points back, so structure emerges on its own
@@ -29,6 +30,8 @@ And a tool for thinking should never grow a marketplace.
 - **New notes** from a button, `Ctrl+N`, the command palette, or just by linking to a name that doesn't exist yet
 - **Command palette** (`Ctrl+K`) fuzzy-jumps to any note, creates one that doesn't exist yet, or runs an app action, all without the mouse
 - **Tags** with a `#tag` explorer to slice across your notes
+- **A real Markdown preview** — CommonMark plus tables, strikethrough, task lists and fenced code, with `[[links]]` and `#tags` live inside it. Raw HTML in a note is shown as text, never rendered, and web links open in your browser rather than hijacking the app
+- **Deleting is recoverable** — notes go to the Recycle Bin, not into thin air
 - **Full-text search** across everything, instant
 - **Safe renaming** — rename a note and every `[[link]]` to it across the vault follows; plain prose that happens to mention the old name is left alone
 - **Stays in agreement with your files** — create, edit, delete, or rename notes in any other program while Plinth is running and it notices and keeps up. If a note you're editing changes on disk underneath you, Plinth never silently picks a side: your unsaved text and the disk version are both kept, and you choose which one survives.
@@ -56,7 +59,7 @@ The same list lives in the app, under ⚙ → "Keyboard shortcuts…".
 
 ## How the vault works
 
-A vault is one folder of Markdown files, and the model is deliberately flat: the `.md` files at the folder's root are the notes — one file, one note, the filename is the note's name. Subfolders are yours to keep anything in; Plinth leaves them completely alone, and if it spots Markdown files inside them it says so (once, dismissibly) rather than silently skipping or half-indexing them. Two files whose names differ only by case are never silently merged either — Plinth indexes neither and tells you.
+A vault is one folder of Markdown files, and the model is deliberately flat: the `.md` files at the folder's root are the notes — one file, one note, the filename is the note's name. Subfolders are yours to keep anything in; Plinth leaves them completely alone, and if it spots Markdown files inside them it says so (once, dismissibly, in a quiet notice rather than an alarm — nothing is wrong) rather than silently skipping or half-indexing them. Two files whose names differ only by case are never silently merged either — Plinth indexes neither and tells you.
 
 The only thing Plinth ever adds to your folder is `.plinth/`, a rebuildable search index. Delete it any time; it is recreated from your files on the next open, because the files are the source of truth.
 
@@ -78,6 +81,7 @@ Plinth is free and open source, MIT licensed. Read it, fork it, keep it running 
 - [Tauri v2](https://v2.tauri.app) — Rust backend for file system + SQLite
 - [Feliz](https://zaid-ajaj.github.io/Feliz/) (React) + Tailwind CSS
 - SQLite as a rebuildable index/search cache stored inside the vault (`.plinth/index.db`); the Markdown files are always the source of truth
+- [markdown-it](https://github.com/markdown-it/markdown-it) + [DOMPurify](https://github.com/cure53/DOMPurify) for the preview, both bundled. "No plugins" means no marketplace and nothing to troubleshoot — it never meant refusing to use a library
 
 ## Build from source
 

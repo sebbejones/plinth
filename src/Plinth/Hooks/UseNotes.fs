@@ -17,13 +17,22 @@ type NotesApi =
       Current: NoteState
       TagFilter: (string * string[]) option
       Dirty: bool
-      /// Vault-scan and watcher warnings (nested files, duplicate names).
+      /// Things to act on: duplicate note names, index write failures.
       Warnings: string[]
+      /// Things working as designed that are still worth saying once —
+      /// Markdown left alone in subfolders, an existing sample reopened.
+      Notices: string[]
       /// Set when filesystem watching is unavailable for the open vault.
       WatcherError: string option
       /// Why the app is on the welcome screen (e.g. last vault missing).
       WelcomeInfo: string option
+      /// Pick a folder and open it as a vault. Used for "change vault"
+      /// and for the welcome screen's "open an existing folder".
       PickVault: unit -> unit
+      /// Same picker, worded for someone starting from nothing.
+      StartNewVault: unit -> unit
+      /// Seed (or reopen) the sample notebook in Documents and open it.
+      OpenSampleVault: unit -> unit
       OpenNote: string -> unit
       OpenToday: unit -> unit
       UpdateContent: string -> unit
@@ -39,6 +48,7 @@ type NotesApi =
       /// In a deleted state: accept the deletion and navigate away.
       DiscardLocal: unit -> unit
       DismissWarnings: unit -> unit
+      DismissNotices: unit -> unit
       DismissWatcherError: unit -> unit
       ExportVault: unit -> unit
       FilterByTag: string -> unit
@@ -56,6 +66,7 @@ let useNotes () : NotesApi =
     let tagFilter, setTagFilter = React.useState<(string * string[]) option> None
     let dirty, setDirty = React.useState false
     let warnings, setWarnings = React.useStateWithUpdater<string[]> [||]
+    let notices, setNotices = React.useStateWithUpdater<string[]> [||]
     let watcherError, setWatcherError = React.useState<string option> None
     let welcomeInfo, setWelcomeInfo = React.useState<string option> None
     // Bumped on every keystroke so a save that finishes can tell whether
@@ -110,8 +121,10 @@ let useNotes () : NotesApi =
     /// Open a folder as the vault. `auto` marks the startup reopen of the
     /// remembered vault: failures land on the welcome screen with an
     /// explanation instead of an error pane, and no note file is created
-    /// unless the vault is empty.
-    let openVaultPath (path: string) (auto: bool) =
+    /// unless the vault is empty. `landing` names the note to open when
+    /// the caller has one in mind (the sample notebook's first page);
+    /// `extra` is a notice to show alongside the vault's own.
+    let openVaultPath (path: string) (auto: bool) (landing: string option) (extra: string list) =
         let before = current
 
         promise {
@@ -122,11 +135,24 @@ let useNotes () : NotesApi =
                 setVault (Some path)
                 setNotes info.Notes
                 setWarnings (fun _ -> info.Warnings)
+                setNotices (fun _ -> Array.append (List.toArray extra) info.Notices)
                 setWatcherError info.WatcherError
                 setTagFilter None
                 setWelcomeInfo None
 
-                if auto then
+                // A landing note is only honoured if a file backs it. Asking
+                // for one that isn't there would create it empty, which is
+                // how someone who deleted a sample note gets it silently
+                // resurrected as a blank page.
+                let landing =
+                    landing
+                    |> Option.filter (fun n ->
+                        info.Notes
+                        |> Array.exists (fun x -> x.Name.ToLowerInvariant() = n.ToLowerInvariant()))
+
+                match landing with
+                | Some name -> openNote name
+                | None when auto ->
                     // Land where the user left off rather than creating
                     // today's note as a side effect of starting the app.
                     let! recent = Tauri.getRecents ()
@@ -138,8 +164,7 @@ let useNotes () : NotesApi =
                         match info.Notes |> Array.tryHead with
                         | Some n -> openNote n.Name
                         | None -> openToday ()
-                else
-                    openToday ()
+                | None -> openToday ()
             with ex ->
                 match vault with
                 | Some _ when not auto ->
@@ -160,13 +185,44 @@ let useNotes () : NotesApi =
         }
         |> Promise.start
 
-    let pickVault () =
+    let pickVaultTitled (title: string) =
         promise {
-            let! choice = Tauri.pickFolder ()
+            let! choice = Tauri.pickFolder title
 
             match choice with
             | None -> ()
-            | Some path -> openVaultPath path false
+            | Some path -> openVaultPath path false None []
+        }
+        |> Promise.start
+
+    let pickVault () =
+        pickVaultTitled "Choose a folder of Markdown notes"
+
+    /// Starting from nothing. The picker is the same one — on Windows it
+    /// can make a folder in place — so the only thing that changes is the
+    /// question being asked.
+    let startNewVault () =
+        pickVaultTitled "Choose an empty folder for your new notebook"
+
+    /// The sample notebook. If one is already in Documents it is opened as
+    /// the user left it rather than being rewritten under them; they are
+    /// told that, once, instead of quietly getting stale-looking notes.
+    let openSampleVault () =
+        promise {
+            try
+                let! s = Tauri.createSampleVault (Date.todayName ())
+
+                let extra =
+                    if s.Created then
+                        []
+                    else
+                        [ sprintf
+                              "A sample notebook was already here, so Plinth opened it as you left it rather than overwriting anything. For a fresh copy, delete %s and try again."
+                              s.Path ]
+
+                openVaultPath s.Path false (Some "Start here") extra
+            with ex ->
+                setWelcomeInfo (Some("Couldn't create the sample notebook: " + Tauri.errorText ex))
         }
         |> Promise.start
 
@@ -175,7 +231,7 @@ let useNotes () : NotesApi =
         match localStorage.getItem lastVaultKey with
         | null
         | "" -> ()
-        | path -> openVaultPath path true
+        | path -> openVaultPath path true None []
 
     React.useEffect (reopenLastVault, [||])
 
@@ -472,29 +528,49 @@ let useNotes () : NotesApi =
         |> Promise.start
 
     let deleteNote (name: string) =
+        // Shared tail: the vault changed, so refresh everything and land
+        // somewhere sensible rather than on a note that no longer exists.
+        let settleAfterDelete (updated: NoteMeta[]) =
+            promise {
+                setNotes updated
+                setTagFilter None
+                do! refreshTags ()
+                let! recent = Tauri.getRecents ()
+                setRecents recent
+
+                match recent |> Array.tryHead with
+                | Some next -> openNote next
+                | None ->
+                    match updated |> Array.tryHead with
+                    | Some n -> openNote n.Name
+                    | None -> openToday ()
+            }
+
         promise {
             try
                 let! confirmed =
                     Tauri.confirmDialog (
-                        sprintf "Delete \"%s\"?\n\nThe .md file will be removed from your vault. Links to it in other notes stay as text and will recreate it if clicked." name
+                        sprintf "Move \"%s\" to the Recycle Bin?\n\nYou can restore it from there. Links to it in other notes stay as text and will recreate it if clicked." name
                     )
 
                 if confirmed then
-                    let! updated = Tauri.deleteFile name
-                    setNotes updated
-                    setTagFilter None
-                    do! refreshTags ()
-                    let! recent = Tauri.getRecents ()
-                    setRecents recent
+                    let! outcome = Tauri.deleteFile name false
 
-                    // Land somewhere sensible: the most recent other note,
-                    // or today's daily note if the vault is now empty.
-                    match recent |> Array.tryHead with
-                    | Some next -> openNote next
-                    | None ->
-                        match updated |> Array.tryHead with
-                        | Some n -> openNote n.Name
-                        | None -> openToday ()
+                    if outcome.Status = "unsupported" then
+                        // No Recycle Bin on this drive. Say so plainly and make
+                        // the irreversible option a separate, explicit choice.
+                        let! permanent =
+                            Tauri.confirmDialog (
+                                sprintf
+                                    "This drive has no Recycle Bin, so \"%s\" can't be moved there. Nothing has been deleted yet.\n\nDelete it permanently instead? This cannot be undone."
+                                    name
+                            )
+
+                        if permanent then
+                            let! hard = Tauri.deleteFile name true
+                            do! settleAfterDelete hard.Notes
+                    else
+                        do! settleAfterDelete outcome.Notes
             with ex ->
                 setCurrent (NoteError(Tauri.errorText ex))
         }
@@ -524,9 +600,12 @@ let useNotes () : NotesApi =
       TagFilter = tagFilter
       Dirty = dirty
       Warnings = warnings
+      Notices = notices
       WatcherError = watcherError
       WelcomeInfo = welcomeInfo
       PickVault = pickVault
+      StartNewVault = startNewVault
+      OpenSampleVault = openSampleVault
       OpenNote = openNote
       OpenToday = openToday
       UpdateContent = updateContent
@@ -537,6 +616,7 @@ let useNotes () : NotesApi =
       LoadDiskVersion = loadDiskVersion
       DiscardLocal = discardLocal
       DismissWarnings = fun () -> setWarnings (fun _ -> [||])
+      DismissNotices = fun () -> setNotices (fun _ -> [||])
       DismissWatcherError = fun () -> setWatcherError None
       ExportVault = exportVault
       FilterByTag = filterByTag

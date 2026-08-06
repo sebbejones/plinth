@@ -152,13 +152,131 @@ SoftwareApplication schema. `landing/index.html` in this repo stays as the
 standalone original; the site copy is the deployed one, so style edits should
 happen there.
 
+## v0.4 — "ready to share", not "more powerful" (planned 2026-08-05)
+
+Sebbe's framing, and the whole scope test: v0.4 makes Plinth safe to hand to
+someone who has never heard the word "vault". Nothing here adds power.
+
+1. **Deletion is recoverable.** `delete_file` in `src-tauri/src/lib.rs` is a
+   bare `fs::remove_file`; move it to the `trash` crate so deleted notes go
+   to the Windows Recycle Bin. Trap: network shares and some removable
+   drives have no Recycle Bin, so the fallback must *ask* rather than
+   silently hard-delete.
+2. **A real Markdown renderer.** `Utils/Markdown.fs` is 126 lines of regex
+   handling headings, bullets, `**bold**`, `` `code` ``, `[[links]]` and
+   `#tags` — and nothing else. Replace with markdown-it (`html: false`,
+   plus DOMPurify as belt-and-braces) for italics, strikethrough, ordered
+   and nested lists, checklists, blockquotes, fenced code and tables. "No
+   plugins" means no marketplace, not no internal libraries. The real work
+   is not the parser: the current renderer returns React elements with
+   `onClick` handlers, so wiki links and tags become a custom inline rule
+   emitting `data-` attributes, read by one delegated click handler.
+3. **Ordinary web links, which do not work at all today.** Not "render
+   badly" — `[text](url)` renders as literal text; there is no link
+   handling anywhere in the codebase. In a Tauri app an `http://` link must
+   open in the *system browser* or it navigates the WebView away and the
+   app is gone with no back button. Needs `tauri-plugin-opener`, a scheme
+   allowlist (http/https/mailto only; `javascript:` and `file:` blocked),
+   and a capabilities entry. Folded into item 2's release but tracked
+   separately because it is its own job.
+4. **DONE 2026-08-05. Fix the first ten minutes.** The welcome screen now
+   asks one question — where do your notes live? — and offers three
+   answers (`welcome` in `Pages/NoteView.fs`); the philosophy is a
+   footnote under them. The sample notebook is five real notes written in
+   `src-tauri/src/sample.rs` and seeded into `Documents\Plinth Sample` by
+   the new `create_sample_vault` command; an existing sample is opened as
+   the user left it, never overwritten, and they are told so once. A test
+   walks every `[[link]]` in the sample through the app's own link parser,
+   which is what caught the sample teaching the syntax in a way that
+   created spurious ghost stars in the Firmament — inline code spans are
+   not exempt from link extraction, so `` `[[Example]]` `` in a note is a
+   real link. The flat-model warning is now a **notice**: `VaultScan`
+   carries `warnings` (act on this) and `notices` (this is working as
+   designed) separately, and notices render in quiet stone rather than
+   alarm amber, because "Plinth left your subfolders alone" is the promise
+   being kept, not a fault. Still to do from this item: the sample content
+   has not been used for the landing-page screenshots yet.
+
+   *Original entry:* The welcome screen explains the
+   philosophy and then asks for a vault folder — fine for someone who
+   already knows what a vault is. Replace with three paths: create a new
+   Plinth notebook, open an existing Markdown folder, or try a sample
+   notebook. **Decided: the sample lands in `Documents\Plinth Sample`** —
+   a real folder they can find again, which reinforces the premise that
+   notes are plain files on their disk, not a demo mode. If it already
+   exists, offer to open it. The sample teaches through use — today's
+   note, a wiki link, a backlink, a tag, the Firmament — with no tutorial
+   carousel. Two related first-run gaps: "open an existing folder" will
+   often hit nested files or duplicate basenames and fire the v0.3.0
+   flat-model warning, which must read as an explanation of how Plinth
+   works rather than a defect report; and the sample content doubles as the
+   landing-page screenshot set, so write it once and use it twice.
+5. **Automatic updates — dropped, and replaced.** The Microsoft Store
+   handles updates and forbids self-updating apps, so shipping v0.4 through
+   the Store (see item 1 under Still open) covers this for free.
+   `tauri-plugin-updater` stays out.
+
+One further gap, not in the original four: **there is no error story.**
+v0.3.0 handles the *expected* failures well — conflicts, external deletion,
+watcher death — but a genuine panic, or a vault on a drive that got
+unplugged, has no defined surface. For "ready to share", an unexpected
+error has to be legible rather than a blank window.
+
+What v0.4 is **not**, written down because scope will try to grow: no
+editor rewrite (still textarea + preview), no sync, no mobile, no export
+beyond the existing zip, no incremental indexer.
+
 ## Still open
 
-1. Decide on code signing (removes the "Windows protected your PC" warning).
-   Azure Trusted Signing is the current low-cost route. Not a blocker — the
-   landing page already explains the warning to first-time downloaders.
-2. Make the build stand on its own: install the .NET SDK and Rust as normal
-   system tools so `build.cmd` doesn't depend on Claude's app storage.
+1. Code signing (removes the "Windows protected your PC" warning).
+   **Route decided 2026-08-05: the Microsoft Store, via MSIX.** Sebbe
+   surfaced this; it is better than either certificate option.
+
+   What was ruled out first: **Azure Trusted Signing is off the table** —
+   since 2025-04-02 Microsoft restricted new signups to *organizations* in
+   the US/Canada with three years of verifiable history, and individual
+   onboarding is paused. The paid fallback would have been a Certum Open
+   Source cert (~€69 first year, ~€29 renewal), but an OV certificate does
+   not silence SmartScreen immediately — it accrues reputation over
+   downloads. Only EV (several hundred a year) bypasses it on day one.
+
+   The Store route beats both, for free:
+   - Store developer registration is free for individuals *and* companies
+     (May 2026), ~200 markets, no credit card.
+   - **Microsoft signs the MSIX on submission.** No certificate purchase,
+     and Store installs never show SmartScreen.
+   - Microsoft publishes a Tauri-specific MSIX guide using the `winapp` CLI
+     (learn.microsoft.com/windows/apps/dev-tools/winapp-cli/guides/tauri,
+     dated 2026-07-23). It produces a real MSIX, not a listing that links
+     to a download.
+   - **It also deletes item 4 (auto-update)** — the Store updates the app,
+     and Store policy forbids self-updating, so `tauri-plugin-updater`
+     must stay OUT of the MSIX build.
+   - Checked the main risk: full-trust MSIX is **not** sandboxed. Plinth's
+     arbitrary-folder file access, bundled SQLite and the `notify` watcher
+     keep working as in a normal desktop app.
+
+   Known costs before starting: certification is a human review (screenshots,
+   description, age rating, privacy statement, rejection loops); an
+   individual account publishes under Sebbe's verified legal name; the
+   package identity and publisher must come from a **Partner Center
+   reservation made before packaging**, or the app gets packaged twice;
+   `winapp` needs Windows 11 and is new enough to expect rough edges. Two
+   channels persist — the Store build is clean, the GitHub `.exe` still
+   warns — which argues for making the Store the primary link on the
+   landing page. One small side effect: the remembered vault path lives in
+   WebView2 localStorage, which is package-local, so someone moving from
+   the NSIS install to the Store install lands on the welcome screen again.
+2. ~~Make the build stand on its own.~~ **DONE 2026-08-05.** It turned out
+   the environment half was already true: the persistent user PATH carries
+   `%LOCALAPPDATA%\Microsoft\dotnet` and `%USERPROFILE%\.cargo\bin`, with
+   .NET SDK 8.0.422 + 10.0.301, Rust 1.96.1 and Node 24 all resolving in a
+   plain terminal. Only the scripts still reached into Claude's app storage.
+   `build.cmd` and `dev.ps1` were rewritten to require the normal toolchain
+   on PATH and fail with install links if it is missing — no app-storage
+   paths remain. Verified by running `build.cmd` in a scrubbed environment
+   (registry PATH only, `DOTNET_ROOT` removed): exit 0, both bundles
+   produced, `Plinth_0.3.1_x64-setup.exe` included.
 3. Genuine future work surfaced by v0.3.0, none urgent: an incremental
    (rather than rebuild-on-open) index if big-vault open time ever matters
    in practice; treating an external rename as a rename instead of

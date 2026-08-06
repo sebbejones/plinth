@@ -10,17 +10,31 @@ open Plinth.Hooks
 open Plinth.Hooks.UseSettings
 open Plinth.Components
 
-let private pillar (title: string) (text: string) =
-    Html.div [
-        prop.className
-            "flex-1 rounded-lg border border-stone-200 bg-white p-4 shadow-sm dark:border-stone-700 dark:bg-stone-800"
+/// One of the three ways in. A card is the whole click target: the first
+/// screen asks for a decision, so it should not also ask you to find the
+/// button inside the explanation.
+let private path (label: string) (text: string) (primary: bool) (onClick: unit -> unit) =
+    let tone =
+        if primary then
+            "border-emerald-700 bg-emerald-800 text-white hover:bg-emerald-700 dark:border-emerald-600"
+        else
+            "border-stone-200 bg-white text-stone-800 hover:border-stone-300 hover:bg-stone-50 dark:border-stone-700 dark:bg-stone-800 dark:text-stone-200 dark:hover:bg-stone-700"
+
+    Html.button [
+        prop.className (
+            "flex-1 rounded-lg border p-4 text-left shadow-sm transition-colors " + tone
+        )
+        prop.onClick (fun _ -> onClick ())
         prop.children [
-            Html.h3 [
-                prop.className "font-semibold text-emerald-900 dark:text-emerald-300"
-                prop.text title
-            ]
+            Html.h3 [ prop.className "font-semibold"; prop.text label ]
             Html.p [
-                prop.className "mt-1 text-sm text-stone-500 dark:text-stone-400"
+                prop.className (
+                    "mt-1 text-sm "
+                    + (if primary then
+                           "text-emerald-100"
+                       else
+                           "text-stone-500 dark:text-stone-400")
+                )
                 prop.text text
             ]
         ]
@@ -32,7 +46,12 @@ let private centered (children: ReactElement list) =
         prop.children children
     ]
 
-let private welcome (info: string option) (onPick: unit -> unit) =
+/// The first screen. It asks one question — where do your notes live? —
+/// and gives three answers, including one for the person who does not yet
+/// have an answer. The argument for Plinth is a footnote here; someone who
+/// has just opened it for the first time has already been convinced enough
+/// to download it, and what they need next is a way in.
+let private welcome (info: string option) (onNew: unit -> unit) (onOpen: unit -> unit) (onSample: unit -> unit) =
     Html.div [
         prop.className "flex flex-1 flex-col items-center justify-center gap-8 px-8"
         prop.children [
@@ -44,9 +63,8 @@ let private welcome (info: string option) (onPick: unit -> unit) =
                         prop.text "Plinth"
                     ]
                     Html.p [
-                        prop.className "mt-4 leading-relaxed text-stone-600 dark:text-stone-300"
-                        prop.text
-                            "Software changes, companies fold, and clouds crash. Your thoughts deserve a foundation that doesn't move. Plinth is a local-first markdown notebook that strips away the noise, leaving you with just your notes, in plain text, exactly where you left them."
+                        prop.className "mt-3 text-lg text-stone-600 dark:text-stone-300"
+                        prop.text "Your notes are Markdown files in a folder you choose. Pick one to begin."
                     ]
                 ]
             ]
@@ -59,18 +77,29 @@ let private welcome (info: string option) (onPick: unit -> unit) =
                 ]
             | None -> Html.none
             Html.div [
-                prop.className "flex w-full max-w-3xl gap-6"
+                prop.className "flex w-full max-w-3xl flex-col gap-4 sm:flex-row sm:gap-6"
                 prop.children [
-                    pillar "Zero Cloud" "Every file lives natively on your hard drive as standard Markdown."
-                    pillar "Zero Plugins" "Core features are baked in so you never troubleshoot broken community code."
-                    pillar "Zero Friction" "Open the app, type your thoughts, and close it. No setup required."
+                    path
+                        "Create a new notebook"
+                        "Choose an empty folder. Plinth opens today's note and you start typing."
+                        true
+                        onNew
+                    path
+                        "Open a folder I already have"
+                        "Point Plinth at existing Markdown files. It reads them where they are and changes nothing."
+                        false
+                        onOpen
+                    path
+                        "Try a sample notebook"
+                        "A handful of real notes in your Documents folder, to click around in first."
+                        false
+                        onSample
                 ]
             ]
-            Html.button [
-                prop.className
-                    "rounded-lg bg-emerald-800 px-6 py-3 text-lg text-white shadow hover:bg-emerald-700"
-                prop.onClick (fun _ -> onPick ())
-                prop.text "Choose your vault folder"
+            Html.p [
+                prop.className "max-w-xl text-center text-sm text-stone-400 dark:text-stone-500"
+                prop.text
+                    "No account, no cloud, no plugins. Software changes and companies fold; plain files in a folder you own outlast both."
             ]
         ]
     ]
@@ -403,7 +432,7 @@ let NoteView () =
         )
         prop.children [
             match api.Current with
-            | NoVault -> welcome api.WelcomeInfo api.PickVault
+            | NoVault -> welcome api.WelcomeInfo api.StartNewVault api.PickVault api.OpenSampleVault
             | _ ->
                 Html.aside [
                     prop.className
@@ -435,6 +464,13 @@ let NoteView () =
                     prop.children [
                         if api.Warnings.Length > 0 then
                             noticeBanner "amber" (api.Warnings |> Array.toList) api.DismissWarnings
+
+                        // Deliberately quiet: a notice is Plinth explaining
+                        // itself, not reporting a fault, and the first one
+                        // most people meet is "your subfolders were left
+                        // alone" on the very first folder they open.
+                        if api.Notices.Length > 0 then
+                            noticeBanner "stone" (api.Notices |> Array.toList) api.DismissNotices
 
                         match api.WatcherError with
                         | Some err ->
@@ -489,6 +525,7 @@ let NoteView () =
                                   OnChange = api.UpdateContent
                                   OnLink = api.OpenNote
                                   OnTag = api.FilterByTag
+                                  OnExternal = fun url -> Tauri.openExternal url |> Promise.start
                                   OnDelete = fun () -> api.DeleteNote name
                                   OnRenameClick = fun () -> setShowRename true }
                     ]
